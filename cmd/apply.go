@@ -242,9 +242,12 @@ func executeState() int {
 					fmt.Fprintln(os.Stderr, "Error reading view state file:", path, err)
 					os.Exit(1)
 				}
-				ok := db.ApplyView(&activeApplyHist, view)
-				if !ok {
+				// only views missing a relation are retried - any other failure will not be fixed by trying again
+				ok, retryable := db.ApplyView(&activeApplyHist, view)
+				if !ok && retryable {
 					viewRetry = append(viewRetry, view)
+				} else if !ok {
+					failures++
 				}
 			}
 			for i := 1; i <= viewItr; i++ {
@@ -252,12 +255,19 @@ func executeState() int {
 					fmt.Printf("Retrying %d views\n", len(viewRetry))
 					var viewRetry2 []manifest.View
 					for _, view := range viewRetry {
-						ok := db.ApplyView(&activeApplyHist, view)
-						if !ok {
+						ok, retryable := db.ApplyView(&activeApplyHist, view)
+						if !ok && retryable {
 							viewRetry2 = append(viewRetry2, view)
+						} else if !ok {
+							failures++
 						}
 					}
+					// no view was created this pass, so nothing changed that could make another pass succeed
+					noProgress := len(viewRetry2) == len(viewRetry)
 					viewRetry = viewRetry2
+					if noProgress {
+						break
+					}
 				} else {
 					viewRetry = nil
 					break
