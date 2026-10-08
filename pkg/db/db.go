@@ -527,20 +527,10 @@ func ApplyTable(history *ApplyHistory, tbl manifest.Table) bool {
 		for _, trg := range tbl.Triggers {
 			_, err = conn.Exec(context.Background(), trg.Ddl)
 			pgErr := asPgError(err)
-			switch {
-			case err == nil:
-				ok = true
-			case pgErr != nil:
-				switch pgErr.Code {
-				case "42710": // trigger already exists
-					ok = true
-				default:
-					ok = false
-				}
-			default:
+			// tracked per trigger so a success never hides an earlier failure on this table
+			trgOk := err == nil || (pgErr != nil && pgErr.Code == "42710") // 42710: trigger already exists
+			if !trgOk {
 				ok = false
-			}
-			if !ok {
 				status = "failed"
 				fmt.Println("  ", trg.Ddl)
 				fmt.Fprintf(os.Stderr, "  FAILURE: Trigger %s failed:\n    %s\n", trg.Name, err)
@@ -551,22 +541,10 @@ func ApplyTable(history *ApplyHistory, tbl manifest.Table) bool {
 		for _, cons := range tbl.Constraints {
 			_, err = conn.Exec(context.Background(), cons.GenerateDdl(tbl.Name))
 			pgErr := asPgError(err)
-			switch {
-			case err == nil:
-				ok = true
-			case pgErr != nil:
-				switch pgErr.Code {
-				case "42P07": // unique constraint already exists
-					ok = true
-				case "42710": // check constraint already exists
-					ok = true
-				default:
-					ok = false
-				}
-			default:
+			// 42P07: unique constraint already exists, 42710: check constraint already exists
+			consOk := err == nil || (pgErr != nil && (pgErr.Code == "42P07" || pgErr.Code == "42710"))
+			if !consOk {
 				ok = false
-			}
-			if !ok {
 				status = "failed"
 				fmt.Println("  ", cons.GenerateDdl(tbl.Name))
 				fmt.Fprintf(os.Stderr, "  FAILURE: Constraint %s failed:\n    %s\n", cons.Name, err)
@@ -581,33 +559,24 @@ func ApplyTable(history *ApplyHistory, tbl manifest.Table) bool {
 	return ok
 }
 
-func ApplyView(history *ApplyHistory, view manifest.View) bool {
-	ok := false
+// ApplyView creates the view. When it fails, retryable reports whether the failure was a missing relation - the view
+// may depend on another view that has not been created yet, so it is worth trying again once the others are applied
+func ApplyView(history *ApplyHistory, view manifest.View) (ok bool, retryable bool) {
 	status := "failed"
 	if instance == nil {
 		Connect()
 	}
 	conn, err := instance.pool.Acquire(context.Background())
 	if checkErr(err, "Error acquiring connection for user") {
-		return false
+		return false, false
 	}
 	defer conn.Release()
 	_, err = conn.Exec(context.Background(), view.GenerateDdl())
 	var description string
-	pgErr := asPgError(err)
-	switch {
-	case err == nil:
-		ok = true
-	case pgErr != nil:
-		switch pgErr.Code {
-		case "42P01": // relation does not exist
-			ok = false
-		default:
-			ok = true
-		}
-	default:
-		ok = false
-
+	ok = err == nil
+	if pgErr := asPgError(err); pgErr != nil && pgErr.Code == "42P01" { // relation does not exist
+		retryable = true
+		fmt.Fprintf(os.Stderr, "  view %s references a relation that does not exist yet: %s\n", view.Name, pgErr.Message)
 	}
 	if !ok {
 		description = err.Error()
@@ -619,11 +588,12 @@ func ApplyView(history *ApplyHistory, view manifest.View) bool {
 	stmtId, err2 := recordStatementHist(history, "Create View", status, description)
 	fmt.Printf("%s: adding view %s to the database - Statement ID: %d\n", strings.ToUpper(status), view.Name, stmtId)
 	checkErr(err2, "Unable to record the statement history for applying the view")
-	return ok
+	return ok, retryable
 }
 
+// ApplyForeignKeys adds every foreign key on the table, returning false if any of them failed
 func ApplyForeignKeys(history *ApplyHistory, tbl manifest.Table) bool {
-	ok := false
+	ok := true
 	stmtType := "Add FK"
 	if instance == nil {
 		Connect()
@@ -638,14 +608,12 @@ func ApplyForeignKeys(history *ApplyHistory, tbl manifest.Table) bool {
 		pgErr := asPgError(err)
 		switch {
 		case err == nil:
-			ok = true
 			stmtId, err2 := recordStatementHist(history, stmtType, "success", fmt.Sprintf("%s.%s", tbl.Name, fk.Name))
 			fmt.Printf("SUCCESS: FK %s.%s added to the database - Statement ID: %d\n", tbl.Name, fk.Name, stmtId)
 			checkErr(err2, "Unable to record the statement history for applying the FK")
 		case pgErr != nil:
 			switch pgErr.Code {
 			case "42710": // already exists
-				ok = true
 				stmtId, err2 := recordStatementHist(history, stmtType, "success", fmt.Sprintf("%s.%s", tbl.Name, fk.Name))
 				fmt.Printf("SUCCESS: FK %s.%s already exists - Statement ID: %d\n", tbl.Name, fk.Name, stmtId)
 				checkErr(err2, "Unable to record the statement history for applying the FK")
