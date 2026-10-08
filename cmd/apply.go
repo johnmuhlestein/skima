@@ -39,12 +39,15 @@ This behavior assumes that there is a defined schema, a user has been bound to t
 schema management tables exist.
 
 You can bootstrap a new schema using the --bootstrap flag.
-Using the --bootstrap flag requires --dbsuperuser and --dbsuperuserpwd flags to be set.
+Using the --bootstrap flag requires --dbsuperuser and --dbsuperuserpwd flags to be set, along with the schema
+name (--dbschema) and the password for the new user (--dbpassword). User and schema names must be lowercase
+letters, digits, _ or $. Re-running a bootstrap is safe.
 This does the following:
   1. creates a new user (technically a role with connect privileges)
     a. if --dbusername is passed in, it will use that value, else the schema name will also be the username.
-    b. if --dbpassword is passed in, that will be the password assigned to the user if not, a password will be generated.
-  2. creates a new schema based on the value passed in via --dbschema or the PSM_DBCONN_SCHEMA environment variable.
+    b. the user is given the password passed in via --dbpassword or the SKM_DBCONN_PASSWORD environment variable.
+       If the user already exists it is left as is, including its password.
+  2. creates a new schema based on the value passed in via --dbschema or the SKM_DBCONN_SCHEMA environment variable.
   3. grants all privileges on the objects in the schema to the user, including grant rights
   4. sets the search path for the user to ONLY the new schema
 `,
@@ -52,10 +55,20 @@ This does the following:
 		manifestVersion = manifest.Version()
 		var failures int
 		if bootstrap {
-			if len(viper.GetString("dbconn.superuser")) > 0 {
-				db.Bootstrap(viper.GetString("dbconn.superuser"), viper.GetString("dbconn.superuserpwd"))
-				db.CreateHistTables()
+			if len(viper.GetString("dbconn.superuser")) == 0 || len(viper.GetString("dbconn.superuserpwd")) == 0 {
+				fmt.Fprintln(os.Stderr, "--bootstrap requires the superuser credentials - set --dbsuperuser and --dbsuperuserpwd (or SKM_DBCONN_SUPERUSER and SKM_DBCONN_SUPERUSERPWD)")
+				os.Exit(1)
 			}
+			if len(viper.GetString("dbconn.schema")) == 0 {
+				fmt.Fprintln(os.Stderr, "--bootstrap requires a schema name - set --dbschema or SKM_DBCONN_SCHEMA")
+				os.Exit(1)
+			}
+			if len(viper.GetString("dbconn.username")) == 0 {
+				// the user defaults to the schema name - set before connecting so the history tables use it too
+				viper.Set("dbconn.username", viper.GetString("dbconn.schema"))
+			}
+			db.Bootstrap(viper.GetString("dbconn.superuser"), viper.GetString("dbconn.superuserpwd"))
+			db.CreateHistTables()
 		} else if hist {
 			db.CreateHistTables()
 		} else if baseline {
@@ -103,7 +116,10 @@ This does the following:
 				fmt.Fprintf(os.Stderr, "unable to retrieve apply history: %s\n", err)
 			}
 		}
-		os.Exit(failures)
+		// exit codes are 0-255, so a raw failure count of 256 would report success
+		if failures > 0 {
+			os.Exit(1)
+		}
 	},
 }
 

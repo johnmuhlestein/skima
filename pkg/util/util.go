@@ -1,6 +1,7 @@
 package util
 
 import (
+	"cmp"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -17,8 +18,8 @@ type SemanticVersion struct {
 }
 
 func ExtractVersion(text string) SemanticVersion {
-	text = strings.TrimLeft(text, "v")
-	text = strings.TrimRight(text, ".json")
+	text = strings.TrimPrefix(text, "v")
+	text = strings.TrimSuffix(text, ".json")
 
 	normText := strings.ReplaceAll(text, "_", ".")
 	var ver SemanticVersion
@@ -35,17 +36,16 @@ func ExtractVersion(text string) SemanticVersion {
 	return ver
 }
 
-func (v SemanticVersion) versum() int64 {
-	versum := (int64(v.major) * 1000000) + (int64(v.minor) * 1000) + int64(v.patch)
-	return versum
-}
-
 func (a SemanticVersion) Compare(b SemanticVersion) int {
-	if a.versum() > b.versum() {
-		return 1
+	// compared part by part so large minor/patch numbers (e.g. 1.1000.0) cannot overflow into the next part
+	if c := cmp.Compare(a.major, b.major); c != 0 {
+		return c
 	}
-	if a.versum() < b.versum() {
-		return -1
+	if c := cmp.Compare(a.minor, b.minor); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(a.patch, b.patch); c != 0 {
+		return c
 	}
 	if len(a.pre) == 0 && len(b.pre) > 0 {
 		return 1

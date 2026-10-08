@@ -37,8 +37,7 @@ func init() {
 
 	// Cobra supports Persistent Flags which will work for this command
 	// and all subcommands, e.g.:
-	manifestCmd.PersistentFlags().StringP("workdir", "w", "", "Override the default working directory")
-	viper.BindPFlag("workdir", manifestCmd.PersistentFlags().Lookup("workdir"))
+	// the --workdir flag is defined on the root command so every command can use it
 
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
