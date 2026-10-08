@@ -38,6 +38,8 @@ func init() {
 	// Persistent Flags and bindings
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.skima.yaml)")
 	rootCmd.PersistentFlags().StringVar(&output, "output", "", "The output format - default is plain, human readable texts. For those commands where it makes sense/is documented, you can also have the output in json format")
+	rootCmd.PersistentFlags().StringP("workdir", "w", "", "The manifest working directory containing the state and deltas directories - overrides the config file value")
+	viper.BindPFlag("workdir", rootCmd.PersistentFlags().Lookup("workdir"))
 	rootCmd.PersistentFlags().String("dbconnstring", "", "The connection string for the database instance - should not include database name, port, schema, username or pwd -  - overrides the config file value")
 	rootCmd.PersistentFlags().Int("dbport", 0, "The database port to connect to - overrides the config file value")
 	rootCmd.PersistentFlags().String("dbdb", "", "The database name within the instance to connect to - overrides the config file value")

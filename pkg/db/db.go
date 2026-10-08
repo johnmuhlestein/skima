@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"skima/pkg/manifest"
 	"skima/pkg/util"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -92,8 +95,7 @@ type ApplyStatement struct {
 
 func Connect() *PgPool {
 	once.Do(func() {
-		var fullConnStr = fmt.Sprintf("postgresql://%s:%s@%s:%d/%s", viper.GetString("dbconn.username"), url.QueryEscape(viper.GetString("dbconn.password")), viper.GetString("dbconn.connstring"), viper.GetInt("dbconn.port"), viper.GetString("dbconn.database"))
-		poolConfig, err := pgxpool.ParseConfig(fullConnStr)
+		poolConfig, err := pgxpool.ParseConfig(connString(viper.GetString("dbconn.username"), viper.GetString("dbconn.password")))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "Unable to parse database connection settings:", err)
 			os.Exit(1)
@@ -154,6 +156,22 @@ func migrateLegacyHistTables(pool *pgxpool.Pool) {
 		}
 		fmt.Println("Renamed legacy perseus history tables to skima_schema_history and skima_schema_statements")
 	}
+}
+
+// role and schema names accepted by bootstrap - postgres' unquoted identifier rules, so the names behave the same whether
+// or not they are quoted elsewhere (e.g. the search_path)
+var identifierPattern = regexp.MustCompile(`^[a-z_][a-z0-9_$]{0,62}$`)
+
+// connString builds a connection URL for the configured host, port and database. The credentials are URL-escaped so
+// they may contain any characters
+func connString(user string, password string) string {
+	connUrl := url.URL{
+		Scheme: "postgresql",
+		User:   url.UserPassword(user, password),
+		Host:   net.JoinHostPort(viper.GetString("dbconn.connstring"), strconv.Itoa(viper.GetInt("dbconn.port"))),
+		Path:   "/" + viper.GetString("dbconn.database"),
+	}
+	return connUrl.String()
 }
 
 // asPgError returns the error reported by the postgres server, or nil when err is nil or did not come from the
@@ -728,26 +746,62 @@ func recordStatementHist(history *ApplyHistory, stmtType string, status string, 
 	return stmtId, nil
 }
 
+// Bootstrap uses the superuser to create the application role and schema, grant the role privileges on the schema and
+// make the schema the role's search path. It is safe to re-run - an existing role keeps its password and the schema is
+// only created if it does not exist. Any failure exits the program.
 func Bootstrap(su string, supwd string) {
-	var fullConnStr = fmt.Sprintf("postgresql://%s:%s@%s:%d/%s", su, supwd, viper.GetString("dbconn.connstring"), viper.GetInt("dbconn.port"), viper.GetString("dbconn.database"))
-	conn, err := pgx.Connect(context.Background(), fullConnStr)
+	username := viper.GetString("dbconn.username")
+	schema := viper.GetString("dbconn.schema")
+	password := viper.GetString("dbconn.password")
+	if len(password) == 0 {
+		fmt.Fprintln(os.Stderr, "A password for the application user is required to bootstrap - set it with --dbpassword or SKM_DBCONN_PASSWORD")
+		os.Exit(1)
+	}
+	for _, name := range []string{username, schema} {
+		if !identifierPattern.MatchString(name) {
+			fmt.Fprintf(os.Stderr, "Invalid user or schema name %q - use lowercase letters, digits, _ or $ (starting with a letter or _), up to 63 characters\n", name)
+			os.Exit(1)
+		}
+	}
+	conn, err := pgx.Connect(context.Background(), connString(su, supwd))
 	if checkErr(err, "Unable to connect to database:") {
 		os.Exit(1)
 	}
 	defer conn.Close(context.Background())
-	fmt.Println("DDL for user:", fmt.Sprintf(bootstrapUser, viper.GetString("dbconn.username"), viper.GetString("dbconn.password")))
-	_, err = conn.Exec(context.Background(), fmt.Sprintf(bootstrapUser, viper.GetString("dbconn.username"), viper.GetString("dbconn.password")))
-	checkErr(err, "Unable to add user:")
-	fmt.Printf("user %s created\n", viper.GetString("dbconn.username"))
-	_, err = conn.Exec(context.Background(), fmt.Sprintf(bootstrapSchema, viper.GetString("dbconn.schema"), viper.GetString("dbconn.username")))
-	checkErr(err, "Unable to create schema:")
-	fmt.Printf("schema %s created\n", viper.GetString("dbconn.schema"))
-	_, err = conn.Exec(context.Background(), fmt.Sprintf(bootstrapGrant, viper.GetString("dbconn.schema"), viper.GetString("dbconn.username")))
-	checkErr(err, "Unable to apply grants:")
+
+	role := pgx.Identifier{username}.Sanitize()
+	schemaName := pgx.Identifier{schema}.Sanitize()
+	var roleExists bool
+	err = conn.QueryRow(context.Background(), "select exists (select 1 from pg_roles where rolname = $1)", username).Scan(&roleExists)
+	if checkErr(err, "Unable to check whether the user exists:") {
+		os.Exit(1)
+	}
+	if roleExists {
+		fmt.Printf("user %s already exists - leaving its password unchanged\n", username)
+	} else {
+		// create user does not accept bind parameters, so the password is escaped as a string literal instead
+		escapedPwd, err := conn.PgConn().EscapeString(password)
+		if checkErr(err, "Unable to escape the user password:") {
+			os.Exit(1)
+		}
+		bootstrapExec(conn, fmt.Sprintf(bootstrapUser, role, escapedPwd), "Unable to add user:")
+		fmt.Printf("user %s created\n", username)
+	}
+	bootstrapExec(conn, fmt.Sprintf(bootstrapSchema, schemaName, role), "Unable to create schema:")
+	fmt.Printf("schema %s is ready\n", schema)
+	bootstrapExec(conn, fmt.Sprintf(bootstrapGrant, schemaName, role), "Unable to apply grants:")
 	fmt.Println("Grants added to schema")
-	_, err = conn.Exec(context.Background(), fmt.Sprintf(bootstrapSearchPath, viper.GetString("dbconn.username"), viper.GetString("dbconn.schema")))
-	checkErr(err, "Unable to set the search path")
-	fmt.Println("Search path has been to the user")
+	bootstrapExec(conn, fmt.Sprintf(bootstrapSearchPath, role, schemaName), "Unable to set the search path:")
+	fmt.Printf("search path for user %s set to %s\n", username, schema)
+}
+
+// bootstrapExec runs a bootstrap statement, exiting on failure. The statement is never printed since it may contain
+// the user's password
+func bootstrapExec(conn *pgx.Conn, sql string, failMsg string) {
+	_, err := conn.Exec(context.Background(), sql)
+	if checkErr(err, failMsg) {
+		os.Exit(1)
+	}
 }
 
 func CreateHistTables() {

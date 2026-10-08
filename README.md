@@ -252,14 +252,15 @@ the behavior defined in this file you can use a different configuration file by 
 
 ### Commands
 Many commands also accept flags that override configuration, in these cases, passing in a flag value would override something set in the configuration, for example the 
-`skima apply` command would accept something like `skima apply --username=altusername`
+`skima apply` command would accept something like `skima apply --dbusername=altusername`. The manifest location can be set for any command with `--workdir` (or `-w`)
 
 ### Environment Variables
 Any value that can be set in the configuration file can also be set as an environment variable. This is most helpful in the case of passing in a database password.
-skima will look for environment variables that begin with *PSM_*. Any configuration can be overridden. You use and underscore in the name of the environment variable
-to separate the different levels of the configuration hierarchy
+skima will look for environment variables that begin with *SKM_*. Any configuration can be overridden. You use an underscore in the name of the environment variable
+to separate the different levels of the configuration hierarchy - for example `dbconn.schema` is `SKM_DBCONN_SCHEMA` and `workdir` is `SKM_WORKDIR`
 
 ```yaml
+workdir: ./myschema
 dbconn:
   connstring: localhost
   port: 5432
