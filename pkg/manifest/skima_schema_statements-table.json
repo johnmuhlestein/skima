@@ -1,0 +1,44 @@
+{
+  "name" : "skima_schema_statements",
+  "columns" : [
+    {
+      "name" : "run_id",
+      "datatype" : "integer",
+      "nullable" : false
+    },
+    {
+      "name" : "stmt_id",
+      "datatype" : "integer",
+      "nullable" : false,
+      "primarykey" : true,
+      "generate" : "always"
+    },
+    {
+      "name" : "stmt_type",
+      "datatype" : "text",
+      "nullable" : true
+    },
+    {
+      "name" : "status",
+      "datatype" : "text",
+      "nullable" : true
+    },
+    {
+      "name" : "description",
+      "datatype" : "text",
+      "nullable" : true
+    }
+  ],
+    "foreign-keys" : [
+      {
+        "name":"skima_hist_fk",
+        "columns" : ["run_id"],
+        "reference" :
+          {
+            "table" : "skima_schema_history",
+            "columns" : ["run_id"]
+          },
+        "deleterule" : "cascade"
+      }
+    ]
+}

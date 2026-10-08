@@ -1,0 +1,7 @@
+.git
+.idea
+.vscode
+*.md
+LICENSE
+Dockerfile
+.dockerignore

@@ -1,0 +1,44 @@
+{
+  "name" : "skima_schema_history",
+  "columns" : [
+    {
+      "name" : "run_id",
+      "datatype" : "integer",
+      "nullable" : false,
+      "primarykey" : true,
+      "generate" : "always"
+    },
+    {
+      "name" : "schema_version",
+      "datatype" : "text",
+      "nullable" : true
+    },
+    {
+      "name" : "apply_start_timestamp",
+      "datatype" : "timestamp",
+      "nullable" : false,
+      "default" : "NOW()",
+      "dfltfunc" : true
+    },
+    {
+      "name" : "completion_timestamp",
+      "datatype" : "timestamp",
+      "nullable" : true
+    },
+    {
+      "name" : "apply_type",
+      "datatype" : "text",
+      "nullable" : true
+    },
+    {
+      "name" : "status",
+      "datatype" : "text",
+      "nullable" : true
+    },
+    {
+      "name" : "delta_file",
+      "datatype" : "text",
+      "nullable" : true
+    }
+  ]
+}
