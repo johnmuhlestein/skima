@@ -339,11 +339,6 @@ that failed and was rolled back is recorded as `rolled back`, and the statements
 Only one `skima apply` runs against a schema at a time. Each apply takes a postgres advisory lock for the schema, so if two deploy jobs
 start together the second waits for the first to finish, then applies only what is still missing.
 
-Earlier versions of this tool named these tables `perseus_schema_history` and `perseus_schema_statements`. When skima connects
-to a schema that still has the `perseus_*` tables, it renames them (along with their sequences and constraints) to the `skima_*` names
-automatically, so existing history and the deployed version are preserved. If both sets of tables exist, skima uses the `skima_*` tables,
-leaves the `perseus_*` tables untouched and prints a warning.
-
 ### Configuration
 Configuration is managed across based on the idea of sane defaults and the ability to override based on how the values are set. The *Environment Variables* section above
 stated to provide some ideas about how this works.
