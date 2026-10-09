@@ -213,6 +213,31 @@ A delta can make the following types of changes
 * constraint - add, drop (valid for check and unique)
 * column - add, drop, rename, alter
 
+#### Transactions
+Each changeset is applied in a single transaction - its deltas, pre/post hooks and SQL deltas either all take effect or none do.
+If any of them fails, the whole changeset is rolled back, the schema stays at the previous version and the run is recorded with a
+`rolled back` status. Fix the changeset and run `skima apply` again.
+
+Errors that skima tolerates (for example dropping a foreign key that does not exist, or the `bypass` codes of a SQL delta) do not
+abort the transaction - each statement runs in its own savepoint.
+
+Some statements cannot run inside a transaction, such as `create index concurrently`. A changeset containing them can opt out of the
+transaction - its deltas are then applied one at a time, and a failure part way through leaves the earlier deltas in place.
+```json
+{
+  "version": "1.0.21",
+  "description": "build an index without locking the table",
+  "transaction": false,
+  "deltas": [
+    {
+      "object": "script",
+      "description": "concurrent index",
+      "sql": ["create index concurrently if not exists documents_type_idx on documents (document_type)"]
+    }
+  ]
+}
+```
+
 ### Semantic Versioning
 The naming convention for delta files is to simply give a file name as a semantic version, but replacing periods (.) with underscores (_) and starting with a "v".
 skima also understand pre release versioning similar to `v1_0_2-rc_1.json` - the important parts are that a pre-release version uses a dash (-) to separate it from the release
@@ -234,7 +259,11 @@ skima records every apply run in two tables in the managed schema
 * `skima_schema_history` - one row per run, with the schema version, apply type (state, changeset, baseline, sql), status and timestamps
 * `skima_schema_statements` - one row per statement executed during a run, with its status and a description
 
-The most recent run with a `success` (or `complete` for a baseline) status determines the currently deployed version.
+The most recent run with a `success` (or `complete` for a baseline) status determines the currently deployed version. A changeset
+that failed and was rolled back is recorded as `rolled back`, and the statements it had already run are marked `rolled back` too.
+
+Only one `skima apply` runs against a schema at a time. Each apply takes a postgres advisory lock for the schema, so if two deploy jobs
+start together the second waits for the first to finish, then applies only what is still missing.
 
 Earlier versions of this tool named these tables `perseus_schema_history` and `perseus_schema_statements`. When skima connects
 to a schema that still has the `perseus_*` tables, it renames them (along with their sequences and constraints) to the `skima_*` names

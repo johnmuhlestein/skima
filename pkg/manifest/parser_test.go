@@ -426,3 +426,25 @@ func TestParseChangeSet_ScriptDelta(t *testing.T) {
 		t.Errorf("Drop table delta parsed as %T - EXPECTED: SimpleDelta", cs.ParsedDeltas[2])
 	}
 }
+
+func TestChangeSet_InTransaction(t *testing.T) {
+	reader = osReadWrapper{}
+	cases := map[string]bool{
+		`{"description":"default","deltas":[]}`:                     true,
+		`{"description":"explicit","transaction":true,"deltas":[]}`: true,
+		`{"description":"opt out","transaction":false,"deltas":[]}`: false,
+	}
+	for changeset, expected := range cases {
+		path := filepath.Join(t.TempDir(), "v1_0_1.json")
+		if err := os.WriteFile(path, []byte(changeset), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cs, err := ParseChangeSet(path)
+		if err != nil {
+			t.Fatalf("Error parsing changeset %s: %s", changeset, err)
+		}
+		if actual := cs.InTransaction(); actual != expected {
+			t.Errorf("InTransaction mismatch for %s - EXPECTED: %t  ACTUAL: %t", changeset, expected, actual)
+		}
+	}
+}

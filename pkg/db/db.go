@@ -27,6 +27,8 @@ const histUpdateComp = "update skima_schema_history set status = $1, completion_
 const histLatest = "select run_id, schema_version, apply_start_timestamp, completion_timestamp, apply_type, status, coalesce(delta_file, '') from skima_schema_history where run_id = (select max(run_id) from skima_schema_history where status in ('complete','success'))"
 const histStatements = "select run_id, stmt_id, stmt_type, status, coalesce(description,'') from skima_schema_statements where run_id = $1 order by stmt_id"
 
+const histStmtRolledBack = "update skima_schema_statements set status = 'rolled back' where run_id = $1 and status = 'success'"
+
 const histStmtInsert = "insert into skima_schema_statements (run_id, stmt_type, status, description) values ($1,$2,$3,$4) returning stmt_id"
 
 const bootstrapUser = "create user %s with password '%s'"
@@ -192,22 +194,132 @@ func checkErr(err error, msg string) bool {
 	return false
 }
 
-func ApplyChangeset(history *ApplyHistory, cs manifest.ChangeSet) int {
-	var failures int
+// execer runs a statement - either a pooled connection or a changeset's transaction
+type execer interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+}
+
+// savepointExecer runs each statement of a transaction in its own savepoint. An error aborts a postgres transaction,
+// but some errors are tolerated (e.g. "already exists", or a sql delta's bypass codes) - rolling back to the savepoint
+// undoes just the failed statement so the rest of the transaction can continue
+type savepointExecer struct {
+	tx pgx.Tx
+}
+
+func (se savepointExecer) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+	savepoint, err := se.tx.Begin(ctx)
+	if err != nil {
+		return pgconn.CommandTag{}, err
+	}
+	tag, err := savepoint.Exec(ctx, sql, arguments...)
+	if err != nil {
+		if pgErr := asPgError(err); pgErr != nil && pgErr.Code == "25001" { // active_sql_transaction
+			fmt.Fprintln(os.Stderr, `  this statement cannot run inside a transaction - set "transaction": false on the changeset to apply it without one`)
+		}
+		savepoint.Rollback(ctx)
+		return tag, err
+	}
+	return tag, savepoint.Commit(ctx)
+}
+
+func acquireConn() *pgxpool.Conn {
 	if instance == nil {
 		Connect()
 	}
 	conn, err := instance.pool.Acquire(context.Background())
 	if checkErr(err, "Error acquiring connection for user") {
+		return nil
+	}
+	return conn
+}
+
+// ApplyChangeset applies every delta in the changeset, returning the number of failures. Unless the changeset opts out
+// with "transaction": false, it is applied in a single transaction - any failure rolls back the whole changeset so the
+// schema is left at the previous version. The history is written on separate connections so it survives a rollback.
+func ApplyChangeset(history *ApplyHistory, cs manifest.ChangeSet) int {
+	conn := acquireConn()
+	if conn == nil {
 		history.Status = "failed"
-		failures++
-		return failures
+		return 1
 	}
 	defer conn.Release()
+	if !cs.InTransaction() {
+		fmt.Printf("Changeset %s is applied without a transaction - a failure part way through is not rolled back\n", cs.Version)
+		return applyDeltas(conn, history, cs)
+	}
+
+	tx, err := conn.Begin(context.Background())
+	if checkErr(err, "Unable to start the changeset transaction:") {
+		history.Status = "failed"
+		return 1
+	}
+	defer tx.Rollback(context.Background()) // no-op once committed
+	failures := applyDeltas(savepointExecer{tx: tx}, history, cs)
+	if failures == 0 {
+		// deferred constraints are checked at commit, so a commit can still fail
+		if err = tx.Commit(context.Background()); err != nil {
+			stmtId, err2 := recordStatementHist(history, "Commit changeset", "failed", err.Error())
+			fmt.Fprintf(os.Stderr, "FAILURE: committing changeset %s - Statement ID: %d\n %s\n", cs.Version, stmtId, err)
+			checkErr(err2, "Unable to record the statement history for committing the changeset")
+			failures++
+		} else {
+			return 0
+		}
+	}
+	if err = tx.Rollback(context.Background()); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+		if conn.Conn().IsClosed() {
+			fmt.Fprintln(os.Stderr, "The database connection was lost - the server discards the open changeset transaction")
+		} else {
+			fmt.Fprintln(os.Stderr, "Unable to roll back the changeset transaction:", err)
+		}
+	}
+	markRolledBack(history)
+	fmt.Fprintf(os.Stderr, "Changeset %s was rolled back - none of its changes were kept\n", cs.Version)
+	return failures
+}
+
+// markRolledBack records that a run's changes were undone - statements recorded as successful did not persist
+func markRolledBack(history *ApplyHistory) {
+	history.Status = "rolled back"
+	conn := acquireConn()
+	if conn == nil {
+		return
+	}
+	defer conn.Release()
+	_, err := conn.Exec(context.Background(), histStmtRolledBack, history.RunId)
+	checkErr(err, "Unable to mark the run's statements as rolled back:")
+}
+
+// LockApply takes a postgres advisory lock for the schema so that only one apply runs against it at a time - two
+// deploy jobs would otherwise apply the same changesets concurrently. If another apply holds the lock, this waits for
+// it to finish. The lock is held on a dedicated connection until the process exits.
+func LockApply() {
+	conn := acquireConn()
+	if conn == nil {
+		os.Exit(1)
+	}
+	key := "skima apply " + viper.GetString("dbconn.schema")
+	var locked bool
+	err := conn.QueryRow(context.Background(), "select pg_try_advisory_lock(hashtext($1))", key).Scan(&locked)
+	if checkErr(err, "Unable to take the apply lock:") {
+		os.Exit(1)
+	}
+	if !locked {
+		fmt.Printf("Another skima apply is running against schema %s - waiting for it to finish\n", viper.GetString("dbconn.schema"))
+		_, err = conn.Exec(context.Background(), "select pg_advisory_lock(hashtext($1))", key)
+		if checkErr(err, "Unable to take the apply lock:") {
+			os.Exit(1)
+		}
+	}
+	// the connection is intentionally never released - closing it at exit releases the lock
+}
+
+func applyDeltas(ex execer, history *ApplyHistory, cs manifest.ChangeSet) int {
+	var failures int
 	fks := make([]manifest.Table, 0)
 	for _, delta := range cs.ParsedDeltas {
 		deltaSkipped := false
-		if !prehook(history, delta) {
+		if !prehook(ex, history, delta) {
 			failures++
 			return failures
 		}
@@ -215,7 +327,7 @@ func ApplyChangeset(history *ApplyHistory, cs manifest.ChangeSet) int {
 		qd, q := delta.(manifest.SqlDelta)
 		if k && sd.Action == "add" && sd.Object == "table" {
 			table := sd.Table()
-			ok := ApplyTable(history, table)
+			ok := applyTable(ex, history, table)
 			if !ok {
 				failures++
 				history.Status = "fast-fail"
@@ -227,7 +339,7 @@ func ApplyChangeset(history *ApplyHistory, cs manifest.ChangeSet) int {
 				}
 			}
 		} else if q && len(qd.Script) < 1 {
-			ok := applySql(history, "delta", qd.Sql, qd.Bypass)
+			ok := applySql(ex, history, "delta", qd.Sql, qd.Bypass)
 			if !ok {
 				failures++
 				return failures
@@ -243,7 +355,7 @@ func ApplyChangeset(history *ApplyHistory, cs manifest.ChangeSet) int {
 				failures++
 				return failures
 			}
-			if !applySql(history, "delta script", []string{script}, qd.Bypass) {
+			if !applySql(ex, history, "delta script", []string{script}, qd.Bypass) {
 				failures++
 				return failures
 			}
@@ -256,7 +368,7 @@ func ApplyChangeset(history *ApplyHistory, cs manifest.ChangeSet) int {
 				checkErr(err2, "Unable to record the statement history for applying the delta")
 				deltaSkipped = true
 			} else {
-				_, err = conn.Exec(context.Background(), delta.GenerateDdl())
+				_, err := ex.Exec(context.Background(), ddl)
 				pgErr := asPgError(err)
 				switch {
 				case err == nil:
@@ -303,7 +415,7 @@ func ApplyChangeset(history *ApplyHistory, cs manifest.ChangeSet) int {
 				}
 			}
 		}
-		if !deltaSkipped && !posthook(history, delta) {
+		if !deltaSkipped && !posthook(ex, history, delta) {
 			failures++
 			return failures
 		}
@@ -311,7 +423,7 @@ func ApplyChangeset(history *ApplyHistory, cs manifest.ChangeSet) int {
 
 	// Now apply the foreign keys - we do this at the end to make sure all tables have been added
 	for _, tbl := range fks {
-		ok := ApplyForeignKeys(history, tbl)
+		ok := applyForeignKeys(ex, history, tbl)
 		if !ok {
 			failures++
 			history.Status = "fast-fail"
@@ -329,17 +441,17 @@ Checks to see if 1) is there a prehook and if so 2) executes the prehook
 returns false if execution of a prehook fails (history is already written)
 returns true if no prehook or successful execution
 */
-func prehook(history *ApplyHistory, delta manifest.Delta) bool {
+func prehook(ex execer, history *ApplyHistory, delta manifest.Delta) bool {
 	switch delta.(type) {
 	case manifest.SimpleDelta:
 		if d := delta.(manifest.SimpleDelta); d.HasPreHook() {
 			if len(d.Pre.Sql) > 0 {
-				if !applySql(history, "pre-hook", d.Pre.Sql, []string{}) {
+				if !applySql(ex, history, "pre-hook", d.Pre.Sql, []string{}) {
 					history.Status = "fast-fail"
 					return false
 				}
 			} else {
-				if !applyScriptHook(history, d.Pre.Script) {
+				if !applyScriptHook(ex, history, d.Pre.Script) {
 					history.Status = "fast-fail"
 					return false
 				}
@@ -348,12 +460,12 @@ func prehook(history *ApplyHistory, delta manifest.Delta) bool {
 	case manifest.ColumnDelta:
 		if d := delta.(manifest.ColumnDelta); d.HasPreHook() {
 			if len(d.Pre.Sql) > 0 {
-				if !applySql(history, "pre-hook", d.Pre.Sql, []string{}) {
+				if !applySql(ex, history, "pre-hook", d.Pre.Sql, []string{}) {
 					history.Status = "fast-fail"
 					return false
 				}
 			} else {
-				if !applyScriptHook(history, d.Pre.Script) {
+				if !applyScriptHook(ex, history, d.Pre.Script) {
 					history.Status = "fast-fail"
 					return false
 				}
@@ -362,12 +474,12 @@ func prehook(history *ApplyHistory, delta manifest.Delta) bool {
 	case manifest.FkDelta:
 		if d := delta.(manifest.FkDelta); d.HasPreHook() {
 			if len(d.Pre.Sql) > 0 {
-				if !applySql(history, "pre-hook", d.Pre.Sql, []string{}) {
+				if !applySql(ex, history, "pre-hook", d.Pre.Sql, []string{}) {
 					history.Status = "fast-fail"
 					return false
 				}
 			} else {
-				if !applyScriptHook(history, d.Pre.Script) {
+				if !applyScriptHook(ex, history, d.Pre.Script) {
 					history.Status = "fast-fail"
 					return false
 				}
@@ -384,17 +496,17 @@ Checks to see if 1) is there a posthook and if so 2) executes the posthook
 returns false if execution of a posthook fails (history is already written)
 returns true if no posthook or successful execution
 */
-func posthook(history *ApplyHistory, delta manifest.Delta) bool {
+func posthook(ex execer, history *ApplyHistory, delta manifest.Delta) bool {
 	switch delta.(type) {
 	case manifest.SimpleDelta:
 		if d := delta.(manifest.SimpleDelta); d.HasPostHook() {
 			if len(d.Post.Sql) > 0 {
-				if !applySql(history, "post-hook", d.Post.Sql, []string{}) {
+				if !applySql(ex, history, "post-hook", d.Post.Sql, []string{}) {
 					history.Status = "fast-fail"
 					return false
 				}
 			} else {
-				if !applyScriptHook(history, d.Post.Script) {
+				if !applyScriptHook(ex, history, d.Post.Script) {
 					history.Status = "fast-fail"
 					return false
 				}
@@ -403,12 +515,12 @@ func posthook(history *ApplyHistory, delta manifest.Delta) bool {
 	case manifest.ColumnDelta:
 		if d := delta.(manifest.ColumnDelta); d.HasPostHook() {
 			if len(d.Post.Sql) > 0 {
-				if !applySql(history, "post-hook", d.Post.Sql, []string{}) {
+				if !applySql(ex, history, "post-hook", d.Post.Sql, []string{}) {
 					history.Status = "fast-fail"
 					return false
 				}
 			} else {
-				if !applyScriptHook(history, d.Post.Script) {
+				if !applyScriptHook(ex, history, d.Post.Script) {
 					history.Status = "fast-fail"
 					return false
 				}
@@ -417,12 +529,12 @@ func posthook(history *ApplyHistory, delta manifest.Delta) bool {
 	case manifest.FkDelta:
 		if d := delta.(manifest.FkDelta); d.HasPostHook() {
 			if len(d.Post.Sql) > 0 {
-				if !applySql(history, "post-hook", d.Post.Sql, []string{}) {
+				if !applySql(ex, history, "post-hook", d.Post.Sql, []string{}) {
 					history.Status = "fast-fail"
 					return false
 				}
 			} else {
-				if !applyScriptHook(history, d.Post.Script) {
+				if !applyScriptHook(ex, history, d.Post.Script) {
 					history.Status = "fast-fail"
 					return false
 				}
@@ -434,20 +546,11 @@ func posthook(history *ApplyHistory, delta manifest.Delta) bool {
 	return true
 }
 
-func applySql(history *ApplyHistory, sqlType string, statements []string, acceptableErrors []string) bool {
-	if instance == nil {
-		Connect()
-	}
-	conn, err := instance.pool.Acquire(context.Background())
-	if checkErr(err, "Error acquiring connection for user") {
-		history.Status = "failed"
-		return false
-	}
-	defer conn.Release()
+func applySql(ex execer, history *ApplyHistory, sqlType string, statements []string, acceptableErrors []string) bool {
 	errSet := util.FromSlice(acceptableErrors)
 
 	for idx, statement := range statements {
-		_, err := conn.Exec(context.Background(), statement)
+		_, err := ex.Exec(context.Background(), statement)
 		if err != nil {
 			if pgErr := asPgError(err); pgErr != nil {
 				code := pgErr.Code
@@ -478,7 +581,7 @@ func applySql(history *ApplyHistory, sqlType string, statements []string, accept
 	return true
 }
 
-func applyScriptHook(history *ApplyHistory, script string) bool {
+func applyScriptHook(ex execer, history *ApplyHistory, script string) bool {
 	// same location as script deltas (see manifest.SqlDelta.GenerateDdl)
 	path := filepath.Join(viper.GetString("workdir"), "deltas", "scripts", script)
 	scriptBytes, err := reader.readFile(path)
@@ -488,16 +591,7 @@ func applyScriptHook(history *ApplyHistory, script string) bool {
 		checkErr(err2, "Unable to record the statement history for 'Delta sql hook'")
 		return false
 	}
-	if instance == nil {
-		Connect()
-	}
-	conn, err := instance.pool.Acquire(context.Background())
-	if checkErr(err, "Error acquiring connection for user") {
-		history.Status = "failed"
-		return false
-	}
-	defer conn.Release()
-	_, err = conn.Exec(context.Background(), string(scriptBytes[:]))
+	_, err = ex.Exec(context.Background(), string(scriptBytes[:]))
 	if err != nil {
 		stmtId, err2 := recordStatementHist(history, fmt.Sprintf("Delta script hook [%s]", script), "failed", err.Error())
 		fmt.Fprintf(os.Stderr, "FAILURE: executing script based hook; %s - Statement ID: %d\n%s\n", script, stmtId, err)
@@ -510,18 +604,20 @@ func applyScriptHook(history *ApplyHistory, script string) bool {
 	return true
 }
 
+// ApplyTable creates the table with its indexes, triggers and constraints on a pooled connection
 func ApplyTable(history *ApplyHistory, tbl manifest.Table) bool {
-	ok := false
-	status := "failed"
-	if instance == nil {
-		Connect()
-	}
-	conn, err := instance.pool.Acquire(context.Background())
-	if checkErr(err, "Error acquiring connection for user") {
+	conn := acquireConn()
+	if conn == nil {
 		return false
 	}
 	defer conn.Release()
-	_, err = conn.Exec(context.Background(), tbl.GenerateDdl())
+	return applyTable(conn, history, tbl)
+}
+
+func applyTable(ex execer, history *ApplyHistory, tbl manifest.Table) bool {
+	ok := false
+	status := "failed"
+	_, err := ex.Exec(context.Background(), tbl.GenerateDdl())
 	if err != nil {
 		stmtId, err2 := recordStatementHist(history, "Create Table", status, err.Error())
 		fmt.Println(tbl.GenerateDdl())
@@ -532,7 +628,7 @@ func ApplyTable(history *ApplyHistory, tbl manifest.Table) bool {
 		status = "success"
 		fmt.Printf("SUCCESS: Table %s base structure complete - adding indexes\n", tbl.Name)
 		for _, idx := range tbl.Indexes {
-			_, err = conn.Exec(context.Background(), idx.GenerateDdl(tbl.Name))
+			_, err = ex.Exec(context.Background(), idx.GenerateDdl(tbl.Name))
 			if err != nil {
 				ok = false
 				status = "failed"
@@ -543,7 +639,7 @@ func ApplyTable(history *ApplyHistory, tbl manifest.Table) bool {
 			}
 		}
 		for _, trg := range tbl.Triggers {
-			_, err = conn.Exec(context.Background(), trg.Ddl)
+			_, err = ex.Exec(context.Background(), trg.Ddl)
 			pgErr := asPgError(err)
 			// tracked per trigger so a success never hides an earlier failure on this table
 			trgOk := err == nil || (pgErr != nil && pgErr.Code == "42710") // 42710: trigger already exists
@@ -557,7 +653,7 @@ func ApplyTable(history *ApplyHistory, tbl manifest.Table) bool {
 			}
 		}
 		for _, cons := range tbl.Constraints {
-			_, err = conn.Exec(context.Background(), cons.GenerateDdl(tbl.Name))
+			_, err = ex.Exec(context.Background(), cons.GenerateDdl(tbl.Name))
 			pgErr := asPgError(err)
 			// 42P07: unique constraint already exists, 42710: check constraint already exists
 			consOk := err == nil || (pgErr != nil && (pgErr.Code == "42P07" || pgErr.Code == "42710"))
@@ -609,20 +705,21 @@ func ApplyView(history *ApplyHistory, view manifest.View) (ok bool, retryable bo
 	return ok, retryable
 }
 
-// ApplyForeignKeys adds every foreign key on the table, returning false if any of them failed
+// ApplyForeignKeys adds every foreign key on the table on a pooled connection, returning false if any of them failed
 func ApplyForeignKeys(history *ApplyHistory, tbl manifest.Table) bool {
-	ok := true
-	stmtType := "Add FK"
-	if instance == nil {
-		Connect()
-	}
-	conn, err := instance.pool.Acquire(context.Background())
-	if checkErr(err, "Error acquiring connection for user") {
+	conn := acquireConn()
+	if conn == nil {
 		return false
 	}
 	defer conn.Release()
+	return applyForeignKeys(conn, history, tbl)
+}
+
+func applyForeignKeys(ex execer, history *ApplyHistory, tbl manifest.Table) bool {
+	ok := true
+	stmtType := "Add FK"
 	for _, fk := range tbl.ForeignKeys {
-		_, err = conn.Exec(context.Background(), fk.AlterStmt(tbl.Name, "add"))
+		_, err := ex.Exec(context.Background(), fk.AlterStmt(tbl.Name, "add"))
 		pgErr := asPgError(err)
 		switch {
 		case err == nil:
