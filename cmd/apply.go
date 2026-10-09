@@ -162,7 +162,7 @@ func executeChangeset(oldVersion util.SemanticVersion) int {
 			for _, change := range changes {
 				changeset, err := manifest.ParseChangeSet(change)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "ERROR parsing the changest file %s: %s\n", change, err)
+					fmt.Fprintf(os.Stderr, "ERROR parsing the changeset file %s: %s\n", change, err)
 					os.Exit(1)
 				}
 				activeApplyHist = db.InitializeHistory(changeset.SemVer, "changeset", filepath.Base(change))
@@ -240,10 +240,8 @@ func executeState() int {
 			ok := db.ApplyTable(&activeApplyHist, table)
 			if !ok {
 				failures++
-			} else {
-				if table.ForeignKeys != nil && len(table.ForeignKeys) > 0 {
-					fks = append(fks, table)
-				}
+			} else if len(table.ForeignKeys) > 0 {
+				fks = append(fks, table)
 			}
 		}
 		// Now apply the foreign keys - we do this as a second loop to make sure all tables have been added

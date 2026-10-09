@@ -55,11 +55,11 @@ func retrieveHist() {
 		fmt.Fprintln(os.Stderr, "Unable to retrieve history", err)
 	} else {
 		if len(output) > 0 {
-			jsonOuptput, err := json.Marshal(applyHist)
+			jsonOutput, err := json.Marshal(applyHist)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "Unable to marshal history object into JSON", err)
 			} else {
-				fmt.Println(string(jsonOuptput))
+				fmt.Println(string(jsonOutput))
 			}
 		} else {
 			fmt.Println(applyHist.String())

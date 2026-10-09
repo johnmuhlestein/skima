@@ -122,7 +122,7 @@ The sequence and primary key are created implicitly, and do not require addition
     },
     {
       "name" : "apply_start_timestamp",
-      "datatype" : "timezonetz",
+      "datatype" : "timestamptz",
       "nullable" : false,
       "default" : "NOW()",
       "dfltfunc" : true
@@ -196,7 +196,7 @@ so a changeset consists of one or more changes and each change is identified as 
       {
         "object": "function",
         "action": "add",
-        "name": "unpdate_last_modified_at"
+        "name": "update_last_modified_at"
       }
     ]
 
@@ -276,7 +276,7 @@ stated to provide some ideas about how this works.
 
 #### Configuration files
 The default/lowest level configuration file is named .skima.yaml and is found in the home directory - `~/.skima.yaml` if you either do not have this file or want to override
-the behavior defined in this file you can use a different configuration file by setting the `config` command line arguement. This argument can be added at any level of the command line
+the behavior defined in this file you can use a different configuration file by setting the `config` command line argument. This argument can be added at any level of the command line
 `skima apply --config=/location/to/your/config.yaml`
 
 ### Commands
@@ -509,7 +509,7 @@ There are some special kinds of deltas and behaviors for executing DML sql state
 and there are pre and post hooks as a feature of any other delta which can also run SQL statements but are tied to the success of the encompassing statement
 
 #### SQL Delta
-Like all other detlas, a SQL delta has an `object` in this case identified by the value `script` 
+Like all other deltas, a SQL delta has an `object` in this case identified by the value `script` 
 it also takes 4 other attributes 
 
 * `description` : Just that, a description of what the sql statement(s) are doing
