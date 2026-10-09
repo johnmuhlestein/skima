@@ -334,9 +334,7 @@ func applyDeltas(ex execer, history *ApplyHistory, cs manifest.ChangeSet) int {
 				return failures
 			}
 			if len(table.ForeignKeys) > 0 {
-				if table.ForeignKeys != nil && len(table.ForeignKeys) > 0 {
-					fks = append(fks, table)
-				}
+				fks = append(fks, table)
 			}
 		} else if q && len(qd.Script) < 1 {
 			ok := applySql(ex, history, "delta", qd.Sql, qd.Bypass)
@@ -436,114 +434,44 @@ func applyDeltas(ex execer, history *ApplyHistory, cs manifest.ChangeSet) int {
 	return failures
 }
 
-/*
-Checks to see if 1) is there a prehook and if so 2) executes the prehook
-returns false if execution of a prehook fails (history is already written)
-returns true if no prehook or successful execution
-*/
+// hooked is implemented by the deltas that support pre/post hooks - those that embed manifest.PrePostHook
+type hooked interface {
+	Hooks() manifest.PrePostHook
+}
+
+// prehook executes the delta's pre hook, if it has one. It returns false if the hook failed (the history is already
+// written) and true if there is no hook or it succeeded
 func prehook(ex execer, history *ApplyHistory, delta manifest.Delta) bool {
-	switch delta.(type) {
-	case manifest.SimpleDelta:
-		if d := delta.(manifest.SimpleDelta); d.HasPreHook() {
-			if len(d.Pre.Sql) > 0 {
-				if !applySql(ex, history, "pre-hook", d.Pre.Sql, []string{}) {
-					history.Status = "fast-fail"
-					return false
-				}
-			} else {
-				if !applyScriptHook(ex, history, d.Pre.Script) {
-					history.Status = "fast-fail"
-					return false
-				}
-			}
-		}
-	case manifest.ColumnDelta:
-		if d := delta.(manifest.ColumnDelta); d.HasPreHook() {
-			if len(d.Pre.Sql) > 0 {
-				if !applySql(ex, history, "pre-hook", d.Pre.Sql, []string{}) {
-					history.Status = "fast-fail"
-					return false
-				}
-			} else {
-				if !applyScriptHook(ex, history, d.Pre.Script) {
-					history.Status = "fast-fail"
-					return false
-				}
-			}
-		}
-	case manifest.FkDelta:
-		if d := delta.(manifest.FkDelta); d.HasPreHook() {
-			if len(d.Pre.Sql) > 0 {
-				if !applySql(ex, history, "pre-hook", d.Pre.Sql, []string{}) {
-					history.Status = "fast-fail"
-					return false
-				}
-			} else {
-				if !applyScriptHook(ex, history, d.Pre.Script) {
-					history.Status = "fast-fail"
-					return false
-				}
-			}
-		}
-	default:
-		return true
+	if d, ok := delta.(hooked); ok {
+		return runHook(ex, history, d.Hooks().Pre, "pre-hook")
 	}
 	return true
 }
 
-/*
-Checks to see if 1) is there a posthook and if so 2) executes the posthook
-returns false if execution of a posthook fails (history is already written)
-returns true if no posthook or successful execution
-*/
+// posthook executes the delta's post hook, if it has one. It returns false if the hook failed (the history is already
+// written) and true if there is no hook or it succeeded
 func posthook(ex execer, history *ApplyHistory, delta manifest.Delta) bool {
-	switch delta.(type) {
-	case manifest.SimpleDelta:
-		if d := delta.(manifest.SimpleDelta); d.HasPostHook() {
-			if len(d.Post.Sql) > 0 {
-				if !applySql(ex, history, "post-hook", d.Post.Sql, []string{}) {
-					history.Status = "fast-fail"
-					return false
-				}
-			} else {
-				if !applyScriptHook(ex, history, d.Post.Script) {
-					history.Status = "fast-fail"
-					return false
-				}
-			}
-		}
-	case manifest.ColumnDelta:
-		if d := delta.(manifest.ColumnDelta); d.HasPostHook() {
-			if len(d.Post.Sql) > 0 {
-				if !applySql(ex, history, "post-hook", d.Post.Sql, []string{}) {
-					history.Status = "fast-fail"
-					return false
-				}
-			} else {
-				if !applyScriptHook(ex, history, d.Post.Script) {
-					history.Status = "fast-fail"
-					return false
-				}
-			}
-		}
-	case manifest.FkDelta:
-		if d := delta.(manifest.FkDelta); d.HasPostHook() {
-			if len(d.Post.Sql) > 0 {
-				if !applySql(ex, history, "post-hook", d.Post.Sql, []string{}) {
-					history.Status = "fast-fail"
-					return false
-				}
-			} else {
-				if !applyScriptHook(ex, history, d.Post.Script) {
-					history.Status = "fast-fail"
-					return false
-				}
-			}
-		}
+	if d, ok := delta.(hooked); ok {
+		return runHook(ex, history, d.Hooks().Post, "post-hook")
+	}
+	return true
+}
+
+// runHook executes a hook's sql statements, or its script file when it has no sql
+func runHook(ex execer, history *ApplyHistory, hook manifest.Hook, hookType string) bool {
+	var ok bool
+	switch {
+	case len(hook.Sql) > 0:
+		ok = applySql(ex, history, hookType, hook.Sql, []string{})
+	case len(hook.Script) > 0:
+		ok = applyScriptHook(ex, history, hook.Script)
 	default:
 		return true
 	}
-	return true
+	if !ok {
+		history.Status = "fast-fail"
+	}
+	return ok
 }
 
 func applySql(ex execer, history *ApplyHistory, sqlType string, statements []string, acceptableErrors []string) bool {
@@ -987,7 +915,7 @@ func (hist ApplyHistory) String() string {
 	}
 
 	bld.WriteString("Apply Statements:\n")
-	if hist.Statements == nil || len(hist.Statements) < 1 {
+	if len(hist.Statements) == 0 {
 		bld.WriteString("  There were no statements applied in associated with this run")
 		return bld.String()
 	}

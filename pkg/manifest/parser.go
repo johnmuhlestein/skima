@@ -661,6 +661,11 @@ func (sd SqlDelta) GenerateDdl() string {
 	return sd.Sql[0]
 }
 
+// Hooks returns the pre/post hooks - promoted to every delta type that embeds PrePostHook
+func (hook PrePostHook) Hooks() PrePostHook {
+	return hook
+}
+
 func (hook PrePostHook) HasPreHook() bool {
 	if len(hook.Pre.Script) > 0 || len(hook.Pre.Sql) > 0 {
 		return true
