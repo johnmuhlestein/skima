@@ -194,16 +194,19 @@ func checkErr(err error, msg string) bool {
 	return false
 }
 
-// execer runs a statement - either a pooled connection or a changeset's transaction
+// execer runs a statement - either a pooled connection or a run's transaction
 type execer interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 }
 
 // savepointExecer runs each statement of a transaction in its own savepoint. An error aborts a postgres transaction,
-// but some errors are tolerated (e.g. "already exists", or a sql delta's bypass codes) - rolling back to the savepoint
-// undoes just the failed statement so the rest of the transaction can continue
+// but some errors are tolerated (e.g. "already exists", a sql delta's bypass codes, or a view whose relation is not
+// created yet) - rolling back to the savepoint undoes just the failed statement so the rest of the transaction can
+// continue
 type savepointExecer struct {
 	tx pgx.Tx
+	// how to opt out of the transaction - printed when a statement cannot run inside one
+	optOut string
 }
 
 func (se savepointExecer) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
@@ -214,7 +217,7 @@ func (se savepointExecer) Exec(ctx context.Context, sql string, arguments ...any
 	tag, err := savepoint.Exec(ctx, sql, arguments...)
 	if err != nil {
 		if pgErr := asPgError(err); pgErr != nil && pgErr.Code == "25001" { // active_sql_transaction
-			fmt.Fprintln(os.Stderr, `  this statement cannot run inside a transaction - set "transaction": false on the changeset to apply it without one`)
+			fmt.Fprintf(os.Stderr, "  this statement cannot run inside a transaction - %s to apply it without one\n", se.optOut)
 		}
 		savepoint.Rollback(ctx)
 		return tag, err
@@ -237,44 +240,74 @@ func acquireConn() *pgxpool.Conn {
 // with "transaction": false, it is applied in a single transaction - any failure rolls back the whole changeset so the
 // schema is left at the previous version. The history is written on separate connections so it survives a rollback.
 func ApplyChangeset(history *ApplyHistory, cs manifest.ChangeSet) int {
+	r := beginRun(history, "changeset "+cs.Version, cs.InTransaction(), `set "transaction": false on the changeset`)
+	if r == nil {
+		return 1
+	}
+	return r.finish(applyDeltas(r.ex, history, cs))
+}
+
+// run applies a changeset or state build on one connection - in a single transaction unless it opted out
+type run struct {
+	conn    *pgxpool.Conn
+	tx      pgx.Tx // nil when the run is applied without a transaction
+	ex      execer
+	history *ApplyHistory
+	name    string // e.g. "changeset 1.0.1" or "state build"
+}
+
+// beginRun acquires a connection and, when inTransaction is set, starts the run's transaction. optOut tells the user
+// how to apply the run without a transaction. It returns nil, with the history marked failed, if either step fails.
+func beginRun(history *ApplyHistory, name string, inTransaction bool, optOut string) *run {
 	conn := acquireConn()
 	if conn == nil {
 		history.Status = "failed"
-		return 1
+		return nil
 	}
-	defer conn.Release()
-	if !cs.InTransaction() {
-		fmt.Printf("Changeset %s is applied without a transaction - a failure part way through is not rolled back\n", cs.Version)
-		return applyDeltas(conn, history, cs)
+	r := &run{conn: conn, ex: conn, history: history, name: name}
+	if !inTransaction {
+		fmt.Printf("The %s is applied without a transaction - a failure part way through is not rolled back\n", name)
+		return r
 	}
-
 	tx, err := conn.Begin(context.Background())
-	if checkErr(err, "Unable to start the changeset transaction:") {
+	if checkErr(err, fmt.Sprintf("Unable to start the %s transaction:", name)) {
+		conn.Release()
 		history.Status = "failed"
-		return 1
+		return nil
 	}
-	defer tx.Rollback(context.Background()) // no-op once committed
-	failures := applyDeltas(savepointExecer{tx: tx}, history, cs)
+	r.tx = tx
+	r.ex = savepointExecer{tx: tx, optOut: optOut}
+	return r
+}
+
+// finish commits the run's transaction when there were no failures, otherwise it rolls the transaction back and marks
+// the run 'rolled back'. It releases the connection and returns the number of failures, including a failed commit.
+func (r *run) finish(failures int) int {
+	defer r.conn.Release()
+	if r.tx == nil {
+		return failures
+	}
+	defer r.tx.Rollback(context.Background()) // no-op once committed
 	if failures == 0 {
 		// deferred constraints are checked at commit, so a commit can still fail
-		if err = tx.Commit(context.Background()); err != nil {
-			stmtId, err2 := recordStatementHist(history, "Commit changeset", "failed", err.Error())
-			fmt.Fprintf(os.Stderr, "FAILURE: committing changeset %s - Statement ID: %d\n %s\n", cs.Version, stmtId, err)
-			checkErr(err2, "Unable to record the statement history for committing the changeset")
-			failures++
-		} else {
+		err := r.tx.Commit(context.Background())
+		if err == nil {
 			return 0
 		}
+		stmtId, err2 := recordStatementHist(r.history, "Commit "+r.name, "failed", err.Error())
+		fmt.Fprintf(os.Stderr, "FAILURE: committing %s - Statement ID: %d\n %s\n", r.name, stmtId, err)
+		checkErr(err2, "Unable to record the statement history for committing the "+r.name)
+		failures++
 	}
-	if err = tx.Rollback(context.Background()); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
-		if conn.Conn().IsClosed() {
-			fmt.Fprintln(os.Stderr, "The database connection was lost - the server discards the open changeset transaction")
+	if err := r.tx.Rollback(context.Background()); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+		if r.conn.Conn().IsClosed() {
+			fmt.Fprintf(os.Stderr, "The database connection was lost - the server discards the open %s transaction\n", r.name)
 		} else {
-			fmt.Fprintln(os.Stderr, "Unable to roll back the changeset transaction:", err)
+			fmt.Fprintf(os.Stderr, "Unable to roll back the %s transaction: %s\n", r.name, err)
 		}
 	}
-	markRolledBack(history)
-	fmt.Fprintf(os.Stderr, "Changeset %s was rolled back - none of its changes were kept\n", cs.Version)
+	markRolledBack(r.history)
+	fmt.Fprintf(os.Stderr, "The %s was rolled back - none of its changes were kept\n", r.name)
 	return failures
 }
 
@@ -532,14 +565,32 @@ func applyScriptHook(ex execer, history *ApplyHistory, script string) bool {
 	return true
 }
 
-// ApplyTable creates the table with its indexes, triggers and constraints on a pooled connection
-func ApplyTable(history *ApplyHistory, tbl manifest.Table) bool {
-	conn := acquireConn()
-	if conn == nil {
-		return false
+// StateBuild applies the objects of a state build (or the state sql files of apply --sql) on one connection. Unless it
+// opts out, the whole build runs in a single transaction - see BeginStateBuild.
+type StateBuild struct {
+	r *run
+}
+
+// BeginStateBuild starts applying a state build. When inTransaction is set every object is created in one transaction,
+// so a build that fails part way through leaves nothing behind. It returns nil, with the history marked failed, if the
+// connection or transaction cannot be started.
+func BeginStateBuild(history *ApplyHistory, name string, inTransaction bool) *StateBuild {
+	r := beginRun(history, name, inTransaction, "set state.transaction to false (--state-transaction=false or SKM_STATE_TRANSACTION=false)")
+	if r == nil {
+		return nil
 	}
-	defer conn.Release()
-	return applyTable(conn, history, tbl)
+	return &StateBuild{r: r}
+}
+
+// Finish commits the build when there were no failures, otherwise it rolls the build back and marks the run 'rolled
+// back'. It returns the number of failures, including a failed commit.
+func (b *StateBuild) Finish(failures int) int {
+	return b.r.finish(failures)
+}
+
+// ApplyTable creates the table with its indexes, triggers and constraints
+func (b *StateBuild) ApplyTable(tbl manifest.Table) bool {
+	return applyTable(b.r.ex, b.r.history, tbl)
 }
 
 func applyTable(ex execer, history *ApplyHistory, tbl manifest.Table) bool {
@@ -603,17 +654,10 @@ func applyTable(ex execer, history *ApplyHistory, tbl manifest.Table) bool {
 
 // ApplyView creates the view. When it fails, retryable reports whether the failure was a missing relation - the view
 // may depend on another view that has not been created yet, so it is worth trying again once the others are applied
-func ApplyView(history *ApplyHistory, view manifest.View) (ok bool, retryable bool) {
+func (b *StateBuild) ApplyView(view manifest.View) (ok bool, retryable bool) {
+	history := b.r.history
 	status := "failed"
-	if instance == nil {
-		Connect()
-	}
-	conn, err := instance.pool.Acquire(context.Background())
-	if checkErr(err, "Error acquiring connection for user") {
-		return false, false
-	}
-	defer conn.Release()
-	_, err = conn.Exec(context.Background(), view.GenerateDdl())
+	_, err := b.r.ex.Exec(context.Background(), view.GenerateDdl())
 	var description string
 	ok = err == nil
 	if pgErr := asPgError(err); pgErr != nil && pgErr.Code == "42P01" { // relation does not exist
@@ -633,14 +677,9 @@ func ApplyView(history *ApplyHistory, view manifest.View) (ok bool, retryable bo
 	return ok, retryable
 }
 
-// ApplyForeignKeys adds every foreign key on the table on a pooled connection, returning false if any of them failed
-func ApplyForeignKeys(history *ApplyHistory, tbl manifest.Table) bool {
-	conn := acquireConn()
-	if conn == nil {
-		return false
-	}
-	defer conn.Release()
-	return applyForeignKeys(conn, history, tbl)
+// ApplyForeignKeys adds every foreign key on the table, returning false if any of them failed
+func (b *StateBuild) ApplyForeignKeys(tbl manifest.Table) bool {
+	return applyForeignKeys(b.r.ex, b.r.history, tbl)
 }
 
 func applyForeignKeys(ex execer, history *ApplyHistory, tbl manifest.Table) bool {
@@ -678,17 +717,11 @@ func applyForeignKeys(ex execer, history *ApplyHistory, tbl manifest.Table) bool
 	return ok
 }
 
-func ApplySql(history *ApplyHistory, filename string, sql string) bool {
+// ApplySql runs a state sql file
+func (b *StateBuild) ApplySql(filename string, sql string) bool {
 	ok := false
-	if instance == nil {
-		Connect()
-	}
-	conn, err := instance.pool.Acquire(context.Background())
-	if checkErr(err, "Error acquiring connection for user") {
-		return false
-	}
-	defer conn.Release()
-	_, err = conn.Exec(context.Background(), sql)
+	history := b.r.history
+	_, err := b.r.ex.Exec(context.Background(), sql)
 	if err != nil {
 		ok = false
 		history.Status = "failed"
