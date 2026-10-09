@@ -1,4 +1,5 @@
-FROM golang:1.25-alpine AS build
+# official Docker Hub images via AWS's public mirror, which avoids Docker Hub's anonymous pull rate limit
+FROM public.ecr.aws/docker/library/golang:1.25-alpine AS build
 
 WORKDIR /app
 
@@ -12,7 +13,7 @@ COPY cmd cmd
 
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/skima .
 
-FROM alpine:3.22
+FROM public.ecr.aws/docker/library/alpine:3.22
 
 # NOTE: curl is needed for the entrypoint script check for the istio sidecar
 RUN apk add --no-cache curl \
