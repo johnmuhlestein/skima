@@ -266,6 +266,38 @@ inspecting the manifest (where the schema/changes are defined)
 As a command line tool, skima has a built-in help system, at the top level you can simply type `skima help` to view the full
 list of top level commands and at each sub command you can use `-h, --help` i.e. `skima [command] --help`
 
+### Validating the manifest
+Every manifest file is checked against a JSON schema for its kind - tables, views and changesets. Validation catches
+misspelled or unknown properties (property names are case sensitive and lowercase, as documented below), missing required
+properties, invalid values and invalid JSON, and reports where in the file each problem is:
+
+```
+skima manifest validate
+INVALID  state/documents-table.json
+         /columns/2: additional properties 'nullabel' not allowed
+INVALID  deltas/v1_0_4.json
+         /deltas/0/mods: set exactly one of datatype, nullable or default to true
+```
+
+* `skima manifest validate` checks every state and changeset file in the working directory, and flags JSON files in `state`
+  that are not named `<name>-table.json` or `<name>-view.json` since skima ignores them
+* `skima manifest validate <file>...` checks individual files - the kind comes from the file name, or use `--type table|view|changeset`
+* `--output=json` gives machine readable results; the exit code is 1 when any file is invalid
+
+`skima apply` validates before it changes anything: the state files plus any changesets newer than the deployed version
+(changesets read their definitions from the state files). If anything is invalid, nothing is applied. Changesets that were
+already applied are not checked, so an old file never blocks a deploy. Use `skima apply --skip-validation` to bypass the check.
+
+The schemas live in [`pkg/manifest/schemas`](pkg/manifest/schemas). To get completion and inline errors in an editor that
+supports JSON schema, add a `$schema` property to a manifest file:
+```
+{
+  "$schema": "https://raw.githubusercontent.com/johnmuhlestein/skima/main/pkg/manifest/schemas/table.schema.json",
+  "name": "documents",
+  ...
+}
+```
+
 ## The nitty-gritty details
 The sections below describes the deeper details of skima, including how apply history is managed, configuration, manifest schema definition and usage, 
 basic commands and examples of a typical workflow
@@ -453,7 +485,7 @@ delta definitions to alter columns behave a little different than the "simple" d
 * alter nullability - either set to NOT NULL or NULL
 
 This is achieved by adding _mods_ information to the delta - indicating true/false one of the types of changes you would like to make. The delta goes back to the state definition of the column to determine the correct value
-only one of `datatype`, `default` or `nullable` is allowed (the example below shows all three, but this is not the expected/actual usage pattern)
+exactly one of `datatype`, `default` or `nullable` must be set to true - to make more than one kind of change to a column, use one delta per change
 
 ```json
 { 
@@ -466,8 +498,15 @@ only one of `datatype`, `default` or `nullable` is allowed (the example below sh
         "name":"description",
         "reference":"skima_schema_statements",
         "mods": {
-          "datatype": true,
-          "default": true,
+          "datatype": true
+        }
+      },
+      {
+        "object":"column",
+        "action":"alter",
+        "name":"description",
+        "reference":"skima_schema_statements",
+        "mods": {
           "nullable": true
         }
       }

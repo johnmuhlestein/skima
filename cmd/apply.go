@@ -18,6 +18,7 @@ var bootstrap bool
 var hist bool
 var baseline bool
 var baselineVersion string
+var skipValidation bool
 var statesql bool
 var activeApplyHist db.ApplyHistory
 var manifestVersion util.SemanticVersion
@@ -41,6 +42,9 @@ This means checking the skima_schema_history table to see if:
      opt out with "transaction": false).
 
 Only one apply runs against a schema at a time - a second apply waits for the first to finish.
+
+Before anything is applied, the state files and the pending changesets are validated against the skima JSON schemas
+(see skima manifest validate --help). If any is invalid nothing is applied - use --skip-validation to bypass the check.
 
 This behavior assumes that there is a defined schema, a user has been bound to that schema as the default search path and that the skima 
 schema management tables exist.
@@ -110,13 +114,17 @@ This does the following:
 			switch err {
 			case nil:
 				fmt.Printf("Version %s is currently deployed - checking for a more current version to deploy\n", hist.SchemaVersion.String())
+				// changesets take their definitions from the state files, so those are validated too
+				validateBeforeApply(pendingChangesets(hist.SchemaVersion))
 				failures = executeChangeset(hist.SchemaVersion)
 			case db.NoHistTable:
+				validateBeforeApply(nil)
 				fmt.Println("Schema is not yet managed by skima - creating the history tables")
 				db.CreateHistTables()
 				fmt.Println("Applying the state definitions")
 				failures = executeState()
 			case pgx.ErrNoRows:
+				validateBeforeApply(nil)
 				fmt.Println("No objects currently managed - will apply the state definition")
 				failures = executeState()
 			default:
@@ -155,18 +163,62 @@ func init() {
 	applyCmd.Flags().BoolVar(&baseline, "baseline", false, "Takes an existing schema that is not managed by skima and sets up the history tables and sets an initial")
 	applyCmd.Flags().StringVar(&baselineVersion, "baseline-version", "1.0.0", "The version to apply to the baseline - 1.0.0 by default")
 	applyCmd.MarkFlagsMutuallyExclusive("bootstrap", "hist", "baseline")
+	applyCmd.Flags().BoolVar(&skipValidation, "skip-validation", false, "Apply without first validating the manifest files against the skima JSON schemas")
 	applyCmd.Flags().BoolVar(&statesql, "sql", false, "Only apply the sql files that are part of the state definition")
 	applyCmd.Flags().Bool("state-transaction", true, "Apply the state build (and --sql) in a single transaction - set to false when a state sql file cannot run inside a transaction - overrides the config file value")
 	viper.BindPFlag("state.transaction", applyCmd.Flags().Lookup("state-transaction"))
 }
 
+// pendingChangesetFiles returns the changeset files newer than the deployed version, in the order they are applied
+func pendingChangesetFiles(deployed util.SemanticVersion) ([]string, error) {
+	deltaFileNames, err := manifest.ListFiles(filepath.Join(viper.GetString("workdir"), "deltas"), "json")
+	if err != nil {
+		return nil, err
+	}
+	return util.NewerVersions(deployed, deltaFileNames), nil
+}
+
+func pendingChangesets(deployed util.SemanticVersion) []string {
+	changes, err := pendingChangesetFiles(deployed)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Unable to read the changeset files:", err)
+		os.Exit(1)
+	}
+	return changes
+}
+
+// validateBeforeApply validates the state files and the given changesets, exiting before anything is applied if any
+// of them is invalid
+func validateBeforeApply(changesets []string) {
+	if skipValidation {
+		fmt.Println("Skipping manifest validation (--skip-validation)")
+		return
+	}
+	stateFiles, err := manifest.StateFiles(viper.GetString("workdir"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Unable to read the state files:", err)
+		os.Exit(1)
+	}
+	var results []manifest.FileValidation
+	for _, path := range stateFiles {
+		kind, _ := manifest.KindOf(path)
+		results = append(results, manifest.ValidateFile(path, kind))
+	}
+	for _, path := range changesets {
+		results = append(results, manifest.ValidateFile(path, manifest.KindChangeset))
+	}
+	fmt.Println("Validating the manifest files")
+	if invalid := reportValidation(results, false, false); invalid > 0 {
+		fmt.Fprintln(os.Stderr, "ERROR: the manifest is invalid - nothing was applied. Fix the files above, or rerun with --skip-validation")
+		os.Exit(1)
+	}
+}
+
 // executeChangeset initializes apply history internally
 // returns the number of errors encountered.
 func executeChangeset(oldVersion util.SemanticVersion) int {
-	deltaFileNames, err := manifest.ListFiles(filepath.Join(viper.GetString("workdir"), "deltas"), "json")
 	var failures int
-	if err == nil {
-		changes := util.NewerVersions(oldVersion, deltaFileNames)
+	if changes, err := pendingChangesetFiles(oldVersion); err == nil {
 		if len(changes) > 0 {
 			fmt.Printf("%d new changesets to apply\n", len(changes))
 			for _, change := range changes {
