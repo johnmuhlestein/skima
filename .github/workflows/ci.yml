@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint, vet and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: docker build
+        run: docker build -t skima:ci .
+
+  integration:
+    name: Apply against Postgres
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      SKM_DBCONN_CONNSTRING: localhost
+      SKM_DBCONN_PORT: "5432"
+      SKM_DBCONN_DATABASE: postgres
+      SKM_DBCONN_SCHEMA: ci_schema
+      SKM_DBCONN_USERNAME: ci_user
+      SKM_DBCONN_PASSWORD: ci_pass
+      SKM_WORKDIR: testdata/ci
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build -o skima .
+
+      - name: Bootstrap schema
+        run: ./skima apply --bootstrap
+        env:
+          SKM_DBCONN_SUPERUSER: postgres
+          SKM_DBCONN_SUPERUSERPWD: postgres
+
+      - name: Apply state
+        run: ./skima apply
+
+      - name: Re-apply is a no-op
+        run: ./skima apply
+
+      - name: Verify schema
+        run: |
+          tables=$(psql -h localhost -U postgres -d postgres -tAc \
+            "select string_agg(table_name, ',' order by table_name) from information_schema.tables where table_schema = 'ci_schema'")
+          echo "tables: $tables"
+          [ "$tables" = "documents,projects,skima_schema_history,skima_schema_statements" ]
+          status=$(psql -h localhost -U postgres -d postgres -tAc \
+            "select schema_version || ':' || status from ci_schema.skima_schema_history where apply_type = 'state'")
+          echo "state run: $status"
+          [ "$status" = "1.0.0:success" ]
