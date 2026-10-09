@@ -84,10 +84,17 @@ func initConfig() {
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	viper.AutomaticEnv() // read in environment variables that match
 
-	// If a config file is found, read it in.
+	// If a config file is found, read it in. Having none is normal - configuration can come from flags and SKM_
+	// environment variables instead. But a config file that was named with --config, or that exists, must be readable -
+	// carrying on without it could apply to the wrong database
 	if err := viper.ReadInConfig(); err == nil {
 		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
-	} else {
-		fmt.Println(err)
+	} else if _, notFound := err.(viper.ConfigFileNotFoundError); !notFound {
+		file := cfgFile
+		if file == "" {
+			file = viper.ConfigFileUsed()
+		}
+		fmt.Fprintf(os.Stderr, "ERROR: unable to read the config file %s: %s\n", file, err)
+		os.Exit(1)
 	}
 }

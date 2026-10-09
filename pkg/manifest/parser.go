@@ -3,6 +3,7 @@ package manifest
 import (
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -271,7 +272,6 @@ func ParseChangeSet(path string) (ChangeSet, error) {
 func Version() util.SemanticVersion {
 	deltaFilePaths, _ := ListFiles(filepath.Join(viper.GetString("workdir"), "deltas"), "json")
 	if len(deltaFilePaths) == 0 {
-		fmt.Println("No delta files found, going with version 1.0.0")
 		return util.ExtractVersion("1.0.0")
 	}
 	// the manifest version is the highest changeset version, whatever its value
@@ -333,10 +333,8 @@ func parseView(raw []byte) (View, error) {
 func ListFiles(path string, sfx string) ([]string, error) {
 	files := make([]string, 0)
 	c, err := reader.readDir(path)
-	switch err.(type) {
-	case *fs.PathError:
-		fmt.Printf("Path %s does not exist - will return an empty list of files\n", path)
-		return files, nil
+	if errors.Is(err, fs.ErrNotExist) {
+		return files, nil // a missing directory (e.g. no deltas yet) has no files - other errors are returned
 	}
 	if err == nil {
 		for _, entry := range c {

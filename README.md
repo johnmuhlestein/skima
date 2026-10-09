@@ -357,6 +357,10 @@ The default/lowest level configuration file is named .skima.yaml and is found in
 the behavior defined in this file you can use a different configuration file by setting the `config` command line argument. This argument can be added at any level of the command line
 `skima apply --config=/location/to/your/config.yaml`
 
+A config file named with `--config` must exist and be readable, and a `.skima.yaml` that skima finds must be valid - otherwise
+skima exits with an error rather than carrying on without it. Having no `.skima.yaml` at all is fine: configuration then comes from
+flags and `SKM_` environment variables.
+
 ### Commands
 Many commands also accept flags that override configuration, in these cases, passing in a flag value would override something set in the configuration, for example the 
 `skima apply` command would accept something like `skima apply --dbusername=altusername`. The manifest location can be set for any command with `--workdir` (or `-w`)
