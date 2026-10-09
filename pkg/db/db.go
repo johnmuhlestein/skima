@@ -104,6 +104,8 @@ func Connect() *PgPool {
 		}
 		// set as a runtime param rather than a URL "options" query value, which newer pgx versions reject
 		poolConfig.ConnConfig.RuntimeParams["search_path"] = viper.GetString("dbconn.schema")
+		// identifies skima's sessions in pg_stat_activity, e.g. who holds the apply lock
+		poolConfig.ConnConfig.RuntimeParams["application_name"] = "skima"
 		newPool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "Unable to connect to database:", err)
@@ -324,27 +326,67 @@ func markRolledBack(history *ApplyHistory) {
 }
 
 // LockApply takes a postgres advisory lock for the schema so that only one apply runs against it at a time - two
-// deploy jobs would otherwise apply the same changesets concurrently. If another apply holds the lock, this waits for
-// it to finish. The lock is held on a dedicated connection until the process exits.
-func LockApply() {
+// deploy jobs would otherwise apply the same changesets concurrently. If another apply holds the lock, this waits up to
+// timeout for it to finish (0 waits indefinitely) and exits if it does not, without applying anything. The lock is
+// held on a dedicated connection until the process exits.
+func LockApply(timeout time.Duration) {
 	conn := acquireConn()
 	if conn == nil {
 		os.Exit(1)
 	}
-	key := "skima apply " + viper.GetString("dbconn.schema")
+	schema := viper.GetString("dbconn.schema")
+	key := "skima apply " + schema
 	var locked bool
 	err := conn.QueryRow(context.Background(), "select pg_try_advisory_lock(hashtext($1))", key).Scan(&locked)
 	if checkErr(err, "Unable to take the apply lock:") {
 		os.Exit(1)
 	}
-	if !locked {
-		fmt.Printf("Another skima apply is running against schema %s - waiting for it to finish\n", viper.GetString("dbconn.schema"))
-		_, err = conn.Exec(context.Background(), "select pg_advisory_lock(hashtext($1))", key)
-		if checkErr(err, "Unable to take the apply lock:") {
-			os.Exit(1)
-		}
+	if locked {
+		return // the connection is intentionally never released - closing it at exit releases the lock
 	}
+
+	wait := "until it finishes"
+	if timeout > 0 {
+		wait = "up to " + timeout.String()
+	}
+	fmt.Printf("Another skima apply is running against schema %s%s - waiting %s\n", schema, lockHolder(conn, key), wait)
+	// lock_timeout bounds the wait for the advisory lock - 0 disables it
+	timeoutMs := timeout.Milliseconds()
+	if timeout > 0 && timeoutMs == 0 {
+		timeoutMs = 1
+	}
+	if _, err = conn.Exec(context.Background(), "select set_config('lock_timeout', $1, false)", strconv.FormatInt(timeoutMs, 10)); checkErr(err, "Unable to set the apply lock timeout:") {
+		os.Exit(1)
+	}
+	_, err = conn.Exec(context.Background(), "select pg_advisory_lock(hashtext($1))", key)
+	if pgErr := asPgError(err); pgErr != nil && pgErr.Code == "55P03" { // lock_not_available
+		fmt.Fprintf(os.Stderr, "ERROR: timed out after %s waiting for the apply lock on schema %s%s - nothing was applied. Rerun once that apply finishes, or set a longer --lock-timeout\n", timeout, schema, lockHolder(conn, key))
+		os.Exit(1)
+	}
+	if checkErr(err, "Unable to take the apply lock:") {
+		os.Exit(1)
+	}
+	fmt.Println("Apply lock acquired")
 	// the connection is intentionally never released - closing it at exit releases the lock
+}
+
+// lockHolder describes the session holding the apply lock, to help find a stuck apply. A bigint advisory lock key is
+// stored in pg_locks as two 32 bit halves: classid (high) and objid (low)
+func lockHolder(conn *pgxpool.Conn, key string) string {
+	var pid int
+	var application, client string
+	var since time.Time
+	err := conn.QueryRow(context.Background(), `select a.pid, coalesce(nullif(a.application_name, ''), 'unknown application'),
+			coalesce(host(a.client_addr), 'local'), coalesce(a.backend_start, now())
+		from pg_locks l join pg_stat_activity a on a.pid = l.pid
+		where l.locktype = 'advisory' and l.granted and l.objsubid = 1
+			and l.classid = ((hashtext($1)::bigint >> 32) & 4294967295)::oid
+			and l.objid = (hashtext($1)::bigint & 4294967295)::oid
+		limit 1`, key).Scan(&pid, &application, &client, &since)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf(" (held by pid %d: %s on %s, connected for %s)", pid, application, client, time.Since(since).Round(time.Second))
 }
 
 func applyDeltas(ex execer, history *ApplyHistory, cs manifest.ChangeSet) int {
