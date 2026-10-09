@@ -238,6 +238,22 @@ transaction - its deltas are then applied one at a time, and a failure part way 
 }
 ```
 
+### State build transaction
+The first `skima apply` against a schema builds it from the state files - pre SQL files, tables, foreign keys, views and post SQL
+files. Like a changeset, the whole build runs in a single transaction: if anything fails, every object it created is rolled back,
+the run is recorded with a `rolled back` status and `skima apply` exits 1. Fix the state files and run `skima apply` again to build
+from a clean schema. Views are created in savepoints too, so a view that depends on a view created after it is simply retried
+inside the transaction. `skima apply --sql` (pre SQL files only) runs in a transaction the same way.
+
+State SQL files must not contain their own transaction control (`begin`/`commit`). If a state SQL file cannot run inside a
+transaction, such as one with `create index concurrently`, turn the transaction off for the state build with the `state.transaction`
+setting - each object is then created one at a time, and a failure part way through leaves the earlier objects in place.
+```yaml
+state:
+  transaction: false
+```
+The same can be set with `skima apply --state-transaction=false` or the `SKM_STATE_TRANSACTION=false` environment variable.
+
 ### Semantic Versioning
 The naming convention for delta files is to simply give a file name as a semantic version, but replacing periods (.) with underscores (_) and starting with a "v".
 skima also understand pre release versioning similar to `v1_0_2-rc_1.json` - the important parts are that a pre-release version uses a dash (-) to separate it from the release

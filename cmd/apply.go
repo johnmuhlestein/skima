@@ -32,6 +32,9 @@ Without designating any additional flags, the behavior is to apply the schema de
 This means checking the skima_schema_history table to see if:
   1. Has schema previously been applied and if not apply the initial schema based on the state files
     a. At this time, the version of the schema will be either the version represented by the most recent changeset or "1.0.0" if there are no changesets.
+    b. The state build (pre sql files, tables, foreign keys, views and post sql files) runs in a single transaction, so a failure
+       rolls the whole build back and leaves no objects behind. If a state sql file cannot run inside a transaction (e.g.
+       create index concurrently), set --state-transaction=false (state.transaction in the config, SKM_STATE_TRANSACTION).
   3. If the skima_schema_history tables indicate that there has been a successful application of a version of the schema
      then if there are changeset (delta) file(s) with a more recent version, those deltas will be applied in order.
      Each changeset is applied in a single transaction, so a failure rolls the whole changeset back (a changeset can
@@ -88,9 +91,14 @@ This does the following:
 			db.FinalizeHistory(&activeApplyHist)
 		} else if statesql {
 			activeApplyHist = db.InitializeHistory(manifestVersion, "sql", "")
-			failures = executeSqlState(&activeApplyHist, "pre")
+			failures = 1
+			if build := db.BeginStateBuild(&activeApplyHist, "state sql run", viper.GetBool("state.transaction")); build != nil {
+				failures = build.Finish(executeSqlState(build, &activeApplyHist, "pre"))
+			}
 			if failures > 0 {
-				activeApplyHist.Status = "failed"
+				if activeApplyHist.Status != "rolled back" {
+					activeApplyHist.Status = "failed"
+				}
 				fmt.Fprintf(os.Stderr, "ERROR: RunID %d had %d failures applying objects which could indicate additional downstream failures. Review the History to determine failures\n", activeApplyHist.RunId, failures)
 			} else {
 				fmt.Printf("SUCCESS: Run %d completed without failures\n", activeApplyHist.RunId)
@@ -148,6 +156,8 @@ func init() {
 	applyCmd.Flags().StringVar(&baselineVersion, "baseline-version", "1.0.0", "The version to apply to the baseline - 1.0.0 by default")
 	applyCmd.MarkFlagsMutuallyExclusive("bootstrap", "hist", "baseline")
 	applyCmd.Flags().BoolVar(&statesql, "sql", false, "Only apply the sql files that are part of the state definition")
+	applyCmd.Flags().Bool("state-transaction", true, "Apply the state build (and --sql) in a single transaction - set to false when a state sql file cannot run inside a transaction - overrides the config file value")
+	viper.BindPFlag("state.transaction", applyCmd.Flags().Lookup("state-transaction"))
 }
 
 // executeChangeset initializes apply history internally
@@ -190,23 +200,23 @@ func executeChangeset(oldVersion util.SemanticVersion) int {
 	return failures
 }
 
-// executeSqlState expects apply history to be initialized externally
-func executeSqlState(history *db.ApplyHistory, phase string) int {
+// executeSqlState applies the state sql files of the phase as part of the build, returning the number of failures
+func executeSqlState(build *db.StateBuild, history *db.ApplyHistory, phase string) int {
 	fmt.Println("Beginning to apply SQL state files")
 	var failures int
 	sqlFilePaths, err := manifest.ListFiles(filepath.Join(viper.GetString("workdir"), "state", "sql", phase), "sql")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error reading state sql file directory:", err)
-		os.Exit(1)
+		return 1
 	}
 	for _, sql := range sqlFilePaths {
 		filename := filepath.Base(sql)
-		dat, err2 := os.ReadFile(sql)
-		if err2 != nil {
+		dat, err := os.ReadFile(sql)
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "Error reading state sql files:", sql, err)
-			os.Exit(1)
+			return failures + 1
 		}
-		ok := db.ApplySql(history, filename, string(dat))
+		ok := build.ApplySql(filename, string(dat))
 		if !ok {
 			failures++
 			history.Status = "failed"
@@ -215,104 +225,115 @@ func executeSqlState(history *db.ApplyHistory, phase string) int {
 	return failures
 }
 
-// executeState will initialize apply history internally
+// executeState will initialize apply history internally. Unless state.transaction is false the whole build runs in
+// a single transaction, so a failure rolls back every object it created.
 func executeState() int {
 	activeApplyHist = db.InitializeHistory(manifestVersion, "state", "")
-	var failures int
-
-	// First apply sql - should not have table dependencies
-	failures = executeSqlState(&activeApplyHist, "pre")
-	if failures < 1 {
-		// Start applying tables
-		tableFilePaths, err := filepath.Glob(filepath.Join(viper.GetString("workdir"), "state", "*-table.json"))
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "Malformed filter for table paths:", err)
-			os.Exit(1)
-		}
-		fmt.Printf("Executing state files as run: %d\n", activeApplyHist.RunId)
-		fks := make([]manifest.Table, 0)
-		for _, path := range tableFilePaths {
-			table, err := manifest.ParseTableByPath(path)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "Error reading state files:", path, err)
-				os.Exit(1)
-			}
-			ok := db.ApplyTable(&activeApplyHist, table)
-			if !ok {
-				failures++
-			} else if len(table.ForeignKeys) > 0 {
-				fks = append(fks, table)
-			}
-		}
-		// Now apply the foreign keys - we do this as a second loop to make sure all tables have been added
-		for _, tbl := range fks {
-			ok := db.ApplyForeignKeys(&activeApplyHist, tbl)
-			if !ok {
-				failures++
-			}
-		}
-		// Start applying views
-		viewFilePaths, err := filepath.Glob(filepath.Join(viper.GetString("workdir"), "state", "*-view.json"))
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "Malformed filter for view paths:", err)
-			failures++
-		} else {
-			var viewItr = 5
-			var viewRetry []manifest.View
-			for _, path := range viewFilePaths {
-				view, err := manifest.ParseViewByPath(path)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, "Error reading view state file:", path, err)
-					os.Exit(1)
-				}
-				// only views missing a relation are retried - any other failure will not be fixed by trying again
-				ok, retryable := db.ApplyView(&activeApplyHist, view)
-				if !ok && retryable {
-					viewRetry = append(viewRetry, view)
-				} else if !ok {
-					failures++
-				}
-			}
-			for i := 1; i <= viewItr; i++ {
-				if len(viewRetry) > 0 {
-					fmt.Printf("Retrying %d views\n", len(viewRetry))
-					var viewRetry2 []manifest.View
-					for _, view := range viewRetry {
-						ok, retryable := db.ApplyView(&activeApplyHist, view)
-						if !ok && retryable {
-							viewRetry2 = append(viewRetry2, view)
-						} else if !ok {
-							failures++
-						}
-					}
-					// no view was created this pass, so nothing changed that could make another pass succeed
-					noProgress := len(viewRetry2) == len(viewRetry)
-					viewRetry = viewRetry2
-					if noProgress {
-						break
-					}
-				} else {
-					viewRetry = nil
-					break
-				}
-			}
-			if len(viewRetry) > 0 {
-				failures += len(viewRetry)
-			}
-		}
-
-		// Finally apply post state sql - this is for loading data and items with table dependencies
-		failures += executeSqlState(&activeApplyHist, "post")
-
+	failures := 1
+	if build := db.BeginStateBuild(&activeApplyHist, "state build", viper.GetBool("state.transaction")); build != nil {
+		failures = build.Finish(buildState(build))
 	}
 
 	if failures > 0 {
-		activeApplyHist.Status = "failed"
+		if activeApplyHist.Status != "rolled back" {
+			activeApplyHist.Status = "failed"
+		}
 		fmt.Fprintf(os.Stderr, "ERROR: RunID %d had %d failures applying objects which could indicate additional downstream failures. Review the History to determine failures\n", activeApplyHist.RunId, failures)
 	} else {
 		fmt.Printf("SUCCESS: Run %d completed without failures\n", activeApplyHist.RunId)
 		activeApplyHist.Status = "success"
 	}
 	db.FinalizeHistory(&activeApplyHist)
+	return failures
+}
+
+// buildState applies the pre sql files, tables, foreign keys, views and post sql files, returning the number of
+// failures. It stops early when a step fails that later steps depend on.
+func buildState(build *db.StateBuild) int {
+	// First apply sql - should not have table dependencies
+	failures := executeSqlState(build, &activeApplyHist, "pre")
+	if failures > 0 {
+		return failures
+	}
+	// Start applying tables
+	tableFilePaths, err := filepath.Glob(filepath.Join(viper.GetString("workdir"), "state", "*-table.json"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Malformed filter for table paths:", err)
+		return failures + 1
+	}
+	fmt.Printf("Executing state files as run: %d\n", activeApplyHist.RunId)
+	fks := make([]manifest.Table, 0)
+	for _, path := range tableFilePaths {
+		table, err := manifest.ParseTableByPath(path)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error reading state files:", path, err)
+			return failures + 1
+		}
+		ok := build.ApplyTable(table)
+		if !ok {
+			failures++
+		} else if len(table.ForeignKeys) > 0 {
+			fks = append(fks, table)
+		}
+	}
+	// Now apply the foreign keys - we do this as a second loop to make sure all tables have been added
+	for _, tbl := range fks {
+		ok := build.ApplyForeignKeys(tbl)
+		if !ok {
+			failures++
+		}
+	}
+	// Start applying views
+	viewFilePaths, err := filepath.Glob(filepath.Join(viper.GetString("workdir"), "state", "*-view.json"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Malformed filter for view paths:", err)
+		failures++
+	} else {
+		var viewItr = 5
+		var viewRetry []manifest.View
+		for _, path := range viewFilePaths {
+			view, err := manifest.ParseViewByPath(path)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Error reading view state file:", path, err)
+				return failures + 1
+			}
+			// only views missing a relation are retried - any other failure will not be fixed by trying again
+			ok, retryable := build.ApplyView(view)
+			if !ok && retryable {
+				viewRetry = append(viewRetry, view)
+			} else if !ok {
+				failures++
+			}
+		}
+		for i := 1; i <= viewItr; i++ {
+			if len(viewRetry) > 0 {
+				fmt.Printf("Retrying %d views\n", len(viewRetry))
+				var viewRetry2 []manifest.View
+				for _, view := range viewRetry {
+					ok, retryable := build.ApplyView(view)
+					if !ok && retryable {
+						viewRetry2 = append(viewRetry2, view)
+					} else if !ok {
+						failures++
+					}
+				}
+				// no view was created this pass, so nothing changed that could make another pass succeed
+				noProgress := len(viewRetry2) == len(viewRetry)
+				viewRetry = viewRetry2
+				if noProgress {
+					break
+				}
+			} else {
+				viewRetry = nil
+				break
+			}
+		}
+		if len(viewRetry) > 0 {
+			failures += len(viewRetry)
+		}
+	}
+
+	// Finally apply post state sql - this is for loading data and items with table dependencies
+	failures += executeSqlState(build, &activeApplyHist, "post")
 	return failures
 }
