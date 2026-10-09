@@ -179,6 +179,14 @@ type ChangeSet struct {
 	ParsedDeltas []Delta
 	Filename     string
 	SemVer       util.SemanticVersion
+	// Transaction is false when the changeset contains statements that cannot run in a transaction (e.g. create index
+	// concurrently). It defaults to true when not set
+	Transaction *bool
+}
+
+// InTransaction reports whether the changeset should be applied in a single transaction
+func (cs ChangeSet) InTransaction() bool {
+	return cs.Transaction == nil || *cs.Transaction
 }
 
 func check(e error, msg string) {

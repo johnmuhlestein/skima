@@ -34,6 +34,10 @@ This means checking the skima_schema_history table to see if:
     a. At this time, the version of the schema will be either the version represented by the most recent changeset or "1.0.0" if there are no changesets.
   3. If the skima_schema_history tables indicate that there has been a successful application of a version of the schema
      then if there are changeset (delta) file(s) with a more recent version, those deltas will be applied in order.
+     Each changeset is applied in a single transaction, so a failure rolls the whole changeset back (a changeset can
+     opt out with "transaction": false).
+
+Only one apply runs against a schema at a time - a second apply waits for the first to finish.
 
 This behavior assumes that there is a defined schema, a user has been bound to that schema as the default search path and that the skima 
 schema management tables exist.
@@ -68,8 +72,13 @@ This does the following:
 				viper.Set("dbconn.username", viper.GetString("dbconn.schema"))
 			}
 			db.Bootstrap(viper.GetString("dbconn.superuser"), viper.GetString("dbconn.superuserpwd"))
+			db.LockApply()
 			db.CreateHistTables()
-		} else if hist {
+			return
+		}
+		// only one apply runs against a schema at a time - a concurrent apply waits here
+		db.LockApply()
+		if hist {
 			db.CreateHistTables()
 		} else if baseline {
 			db.CreateHistTables()
