@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/johnmuhlestein/skima/main/pkg/manifest/schemas/changeset.schema.json",
+  "title": "skima changeset",
+  "description": "A changeset file (deltas/v<major>_<minor>_<patch>.json) - the version comes from the file name",
+  "type": "object",
+  "required": ["deltas"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": {
+      "type": "string",
+      "description": "Informational only - the changeset version is taken from the file name"
+    },
+    "description": { "type": "string" },
+    "transaction": {
+      "type": "boolean",
+      "description": "false applies the changeset without a transaction (for statements such as create index concurrently)"
+    },
+    "deltas": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/delta" }
+    }
+  },
+  "$defs": {
+    "name": { "$ref": "table.schema.json#/$defs/name" },
+    "sqlList": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "hook": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sql": { "$ref": "#/$defs/sqlList" },
+        "script": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A sql file in deltas/scripts"
+        }
+      },
+      "oneOf": [
+        { "required": ["sql"] },
+        { "required": ["script"] }
+      ]
+    },
+    "addDrop": { "enum": ["add", "drop"] },
+    "delta": {
+      "type": "object",
+      "required": ["object"],
+      "properties": {
+        "object": {
+          "enum": ["table", "view", "function", "index", "trigger", "pk", "fk", "constraint", "column", "script"]
+        }
+      },
+      "allOf": [
+        { "if": { "$ref": "#/$defs/isObject/table" }, "then": { "$ref": "#/$defs/namedDelta" } },
+        { "if": { "$ref": "#/$defs/isObject/view" }, "then": { "$ref": "#/$defs/namedDelta" } },
+        { "if": { "$ref": "#/$defs/isObject/function" }, "then": { "$ref": "#/$defs/namedDelta" } },
+        { "if": { "$ref": "#/$defs/isObject/index" }, "then": { "$ref": "#/$defs/indexDelta" } },
+        { "if": { "$ref": "#/$defs/isObject/trigger" }, "then": { "$ref": "#/$defs/tableObjectDelta" } },
+        { "if": { "$ref": "#/$defs/isObject/pk" }, "then": { "$ref": "#/$defs/tableObjectDelta" } },
+        { "if": { "$ref": "#/$defs/isObject/constraint" }, "then": { "$ref": "#/$defs/tableObjectDelta" } },
+        { "if": { "$ref": "#/$defs/isObject/fk" }, "then": { "$ref": "#/$defs/fkDelta" } },
+        { "if": { "$ref": "#/$defs/isObject/column" }, "then": { "$ref": "#/$defs/columnDelta" } },
+        { "if": { "$ref": "#/$defs/isObject/script" }, "then": { "$ref": "#/$defs/scriptDelta" } }
+      ]
+    },
+    "isObject": {
+      "table": { "required": ["object"], "properties": { "object": { "const": "table" } } },
+      "view": { "required": ["object"], "properties": { "object": { "const": "view" } } },
+      "function": { "required": ["object"], "properties": { "object": { "const": "function" } } },
+      "index": { "required": ["object"], "properties": { "object": { "const": "index" } } },
+      "trigger": { "required": ["object"], "properties": { "object": { "const": "trigger" } } },
+      "pk": { "required": ["object"], "properties": { "object": { "const": "pk" } } },
+      "constraint": { "required": ["object"], "properties": { "object": { "const": "constraint" } } },
+      "fk": { "required": ["object"], "properties": { "object": { "const": "fk" } } },
+      "column": { "required": ["object"], "properties": { "object": { "const": "column" } } },
+      "script": { "required": ["object"], "properties": { "object": { "const": "script" } } }
+    },
+    "namedDelta": {
+      "description": "table, view and function deltas - the definition comes from the state files by name",
+      "required": ["action", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "object": true,
+        "action": { "$ref": "#/$defs/addDrop" },
+        "name": { "$ref": "#/$defs/name" },
+        "pre": { "$ref": "#/$defs/hook" },
+        "post": { "$ref": "#/$defs/hook" }
+      }
+    },
+    "indexDelta": {
+      "description": "index deltas - add needs the table (reference) whose state file defines the index",
+      "required": ["action", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "object": true,
+        "action": { "$ref": "#/$defs/addDrop" },
+        "name": { "$ref": "#/$defs/name" },
+        "reference": { "$ref": "#/$defs/name" },
+        "pre": { "$ref": "#/$defs/hook" },
+        "post": { "$ref": "#/$defs/hook" }
+      },
+      "if": { "required": ["action"], "properties": { "action": { "const": "add" } } },
+      "then": { "required": ["reference"] }
+    },
+    "tableObjectDelta": {
+      "description": "trigger, pk and constraint deltas - reference is the table they belong to",
+      "required": ["action", "name", "reference"],
+      "additionalProperties": false,
+      "properties": {
+        "object": true,
+        "action": { "$ref": "#/$defs/addDrop" },
+        "name": { "$ref": "#/$defs/name" },
+        "reference": { "$ref": "#/$defs/name" },
+        "pre": { "$ref": "#/$defs/hook" },
+        "post": { "$ref": "#/$defs/hook" }
+      }
+    },
+    "fkDelta": {
+      "description": "fk deltas - either by name from the reference table's state file, or an explicit definition (def) added to tablename",
+      "required": ["action"],
+      "additionalProperties": false,
+      "properties": {
+        "object": true,
+        "action": { "$ref": "#/$defs/addDrop" },
+        "name": { "$ref": "#/$defs/name" },
+        "reference": { "$ref": "#/$defs/name" },
+        "def": { "$ref": "table.schema.json#/$defs/foreignKey" },
+        "tablename": { "$ref": "#/$defs/name" },
+        "pre": { "$ref": "#/$defs/hook" },
+        "post": { "$ref": "#/$defs/hook" }
+      },
+      "if": { "required": ["def"] },
+      "then": {
+        "required": ["tablename"],
+        "properties": { "action": { "const": "add" } },
+        "not": { "anyOf": [{ "required": ["name"] }, { "required": ["reference"] }] }
+      },
+      "else": {
+        "required": ["name", "reference"],
+        "not": { "required": ["tablename"] }
+      }
+    },
+    "columnDelta": {
+      "description": "column deltas - reference is the table. add takes the definition from state or an explicit def, rename needs newname, alter needs mods",
+      "required": ["action", "name", "reference"],
+      "additionalProperties": false,
+      "properties": {
+        "object": true,
+        "action": { "enum": ["add", "drop", "rename", "alter"] },
+        "name": { "$ref": "#/$defs/name" },
+        "reference": { "$ref": "#/$defs/name" },
+        "newname": { "$ref": "#/$defs/name" },
+        "def": { "$ref": "table.schema.json#/$defs/column" },
+        "mods": { "$ref": "#/$defs/columnMods" },
+        "pre": { "$ref": "#/$defs/hook" },
+        "post": { "$ref": "#/$defs/hook" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["action"], "properties": { "action": { "const": "rename" } } },
+          "then": { "required": ["newname"] },
+          "else": { "not": { "required": ["newname"] } }
+        },
+        {
+          "if": { "required": ["action"], "properties": { "action": { "const": "alter" } } },
+          "then": { "required": ["mods"] },
+          "else": { "not": { "required": ["mods"] } }
+        },
+        {
+          "if": { "required": ["def"] },
+          "then": { "properties": { "action": { "enum": ["add", "drop"] } } }
+        }
+      ]
+    },
+    "columnMods": {
+      "description": "Which part of the column to alter to match its state definition - exactly one must be true",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "datatype": { "type": "boolean" },
+        "nullable": { "type": "boolean" },
+        "default": { "type": "boolean" }
+      },
+      "oneOf": [
+        { "required": ["datatype"], "properties": { "datatype": { "const": true } } },
+        { "required": ["nullable"], "properties": { "nullable": { "const": true } } },
+        { "required": ["default"], "properties": { "default": { "const": true } } }
+      ]
+    },
+    "scriptDelta": {
+      "description": "SQL deltas - either inline sql statements or a script file in deltas/scripts",
+      "additionalProperties": false,
+      "properties": {
+        "object": true,
+        "description": { "type": "string" },
+        "sql": { "$ref": "#/$defs/sqlList" },
+        "script": { "type": "string", "minLength": 1 },
+        "bypass": {
+          "type": "array",
+          "description": "postgres error codes (SQLSTATE) that count as success",
+          "items": { "type": "string", "pattern": "^[0-9A-Z]{5}$" }
+        }
+      },
+      "oneOf": [
+        { "required": ["sql"] },
+        { "required": ["script"] }
+      ]
+    }
+  }
+}

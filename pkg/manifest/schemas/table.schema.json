@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/johnmuhlestein/skima/main/pkg/manifest/schemas/table.schema.json",
+  "title": "skima table definition",
+  "description": "A table state file (state/<name>-table.json)",
+  "type": "object",
+  "required": ["name", "columns"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "name": { "$ref": "#/$defs/name" },
+    "columns": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/column" }
+    },
+    "primary-key": { "$ref": "#/$defs/nameList" },
+    "foreign-keys": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/foreignKey" }
+    },
+    "indexes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/index" }
+    },
+    "triggers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/trigger" }
+    },
+    "constraints": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/constraint" }
+    }
+  },
+  "$defs": {
+    "name": { "type": "string", "minLength": 1 },
+    "nameList": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/name" }
+    },
+    "column": {
+      "type": "object",
+      "required": ["name", "datatype"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/name" },
+        "datatype": { "type": "string", "minLength": 1 },
+        "nullable": { "type": "boolean" },
+        "default": {
+          "type": "string",
+          "description": "Quoted as a string literal unless dfltfunc is true or the datatype is boolean or numeric"
+        },
+        "dfltfunc": {
+          "type": "boolean",
+          "description": "The default is a function or expression (e.g. NOW()) and is not quoted"
+        },
+        "primarykey": { "type": "boolean" },
+        "generate": {
+          "enum": ["always", "by default"],
+          "description": "Makes the column an identity primary key - requires primarykey: true"
+        }
+      },
+      "dependentSchemas": {
+        "generate": {
+          "required": ["primarykey"],
+          "properties": { "primarykey": { "const": true } }
+        }
+      }
+    },
+    "referentialAction": {
+      "enum": [
+        "no action", "restrict", "cascade", "set null", "set default",
+        "NO ACTION", "RESTRICT", "CASCADE", "SET NULL", "SET DEFAULT"
+      ]
+    },
+    "foreignKey": {
+      "type": "object",
+      "required": ["name", "columns", "reference"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/name" },
+        "columns": { "$ref": "#/$defs/nameList" },
+        "reference": {
+          "type": "object",
+          "required": ["table", "columns"],
+          "additionalProperties": false,
+          "properties": {
+            "table": { "$ref": "#/$defs/name" },
+            "columns": { "$ref": "#/$defs/nameList" }
+          }
+        },
+        "deleterule": { "$ref": "#/$defs/referentialAction" },
+        "updaterule": { "$ref": "#/$defs/referentialAction" }
+      }
+    },
+    "index": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/name" },
+        "columns": { "$ref": "#/$defs/nameList" },
+        "unique": { "type": "boolean" },
+        "ddl": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Full create index statement - used instead of columns/unique when set"
+        }
+      },
+      "anyOf": [
+        { "required": ["columns"] },
+        { "required": ["ddl"] }
+      ]
+    },
+    "trigger": {
+      "type": "object",
+      "required": ["name", "ddl"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/name" },
+        "ddl": { "type": "string", "minLength": 1 }
+      }
+    },
+    "constraint": {
+      "type": "object",
+      "required": ["name", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/name" },
+        "type": { "enum": ["unique", "check"] },
+        "columns": { "$ref": "#/$defs/nameList" },
+        "condition": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "unique" } } },
+          "then": { "required": ["columns"] }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "check" } } },
+          "then": { "required": ["condition"] }
+        }
+      ]
+    }
+  }
+}
