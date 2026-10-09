@@ -194,18 +194,10 @@ func validateBeforeApply(changesets []string) {
 		fmt.Println("Skipping manifest validation (--skip-validation)")
 		return
 	}
-	stateFiles, err := manifest.StateFiles(viper.GetString("workdir"))
+	results, err := manifest.ValidateForApply(viper.GetString("workdir"), changesets)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Unable to read the state files:", err)
+		fmt.Fprintln(os.Stderr, "Unable to read the manifest files:", err)
 		os.Exit(1)
-	}
-	var results []manifest.FileValidation
-	for _, path := range stateFiles {
-		kind, _ := manifest.KindOf(path)
-		results = append(results, manifest.ValidateFile(path, kind))
-	}
-	for _, path := range changesets {
-		results = append(results, manifest.ValidateFile(path, manifest.KindChangeset))
 	}
 	fmt.Println("Validating the manifest files")
 	if invalid := reportValidation(results, false, false); invalid > 0 {

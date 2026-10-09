@@ -156,6 +156,10 @@ Inside the `state` directory, you have the option of writing SQL files/scripts f
 database objects (tables and views in this case). This is ideal for things like functions, particularly trigger functions, so that they are available at the point in time the tables are created.
 Additionally, there is a `post` directory that will execute after all other objects are created. This is ideal for things like loading data into tables needed to act as a bootstrap on creation.
 
+A changeset `function` add delta (`{"object": "function", "action": "add", "name": "myfunction"}`) runs the function's sql file
+from `state/sql/pre/myfunction.sql`, the same file a state build runs. For manifests written before this, `state/sql/myfunction.sql`
+is used when there is no file in `pre`.
+
 ### Changesets
 
 Changes over time are defined as changesets - files named with a version number in the `deltas` directory. The example below has 2 changes - identified as **_deltas_**, 
@@ -284,8 +288,30 @@ INVALID  deltas/v1_0_4.json
 * `skima manifest validate <file>...` checks individual files - the kind comes from the file name, or use `--type table|view|changeset`
 * `--output=json` gives machine readable results; the exit code is 1 when any file is invalid
 
+Validation also checks the references between files:
+* **State files** - a table or view's `name` matches its file name (deltas load `state/users-table.json` for table `users`),
+  no column is defined twice, primary key, index, constraint and foreign key columns exist, and foreign keys reference tables
+  that have a state file (schema-qualified tables like `audit.events` are skipped)
+* **Changesets** - the file name is a version (`v1_0_2.json`, `v1_0_2-rc_1.json`) that no other changeset shares - only one
+  of two changesets with the same version would ever be applied. Each delta's definition must be where applying it looks:
+  a table/view add needs its state file, a column add or alter needs the column in the table's state file, an index,
+  trigger, constraint, fk or pk add needs it in the referenced table's state file, a function add needs its sql file
+  (see [State SQL Files](#state-sql-files)) and script deltas and hooks need their file in `deltas/scripts`. Without these
+  checks the apply fails part way, or the delta generates no DDL and is silently skipped
+
+Old changesets can legitimately reference definitions that were later removed from the state files - a column added in
+`v1_0_3` and dropped in `v1_0_9` is no longer in the state file. So `skima manifest validate` reports reference problems in
+changesets as warnings (the exit code stays 0), unless they are in changesets newer than `--since <version>`. In CI, pass the
+deployed version to make problems in the changesets still to be applied errors:
+```
+skima manifest validate --since 1.4.2
+INVALID  deltas/v1_4_3.json
+         /deltas/0/name: table 'users' has no column 'nickname' in state/users-table.json
+```
+
 `skima apply` validates before it changes anything: the state files plus any changesets newer than the deployed version
-(changesets read their definitions from the state files). If anything is invalid, nothing is applied. Changesets that were
+(changesets read their definitions from the state files), with reference problems in those changesets as errors. If anything
+is invalid, nothing is applied. Changesets that were
 already applied are not checked, so an old file never blocks a deploy. Use `skima apply --skip-validation` to bypass the check.
 
 The schemas live in [`pkg/manifest/schemas`](pkg/manifest/schemas). To get completion and inline errors in an editor that
