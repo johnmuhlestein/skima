@@ -7,6 +7,7 @@ import (
 	"skima/pkg/db"
 	"skima/pkg/manifest"
 	"skima/pkg/util"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/spf13/viper"
@@ -41,7 +42,9 @@ This means checking the skima_schema_history table to see if:
      Each changeset is applied in a single transaction, so a failure rolls the whole changeset back (a changeset can
      opt out with "transaction": false).
 
-Only one apply runs against a schema at a time - a second apply waits for the first to finish.
+Only one apply runs against a schema at a time - a second apply waits for the first to finish, for up to
+--lock-timeout (5m by default; lock.timeout in the config, SKM_LOCK_TIMEOUT). If the first apply is still running after
+that, the second exits without applying anything and reports which session holds the lock.
 
 Before anything is applied, the state files and the pending changesets are validated against the skima JSON schemas
 (see skima manifest validate --help). If any is invalid nothing is applied - use --skip-validation to bypass the check.
@@ -79,12 +82,12 @@ This does the following:
 				viper.Set("dbconn.username", viper.GetString("dbconn.schema"))
 			}
 			db.Bootstrap(viper.GetString("dbconn.superuser"), viper.GetString("dbconn.superuserpwd"))
-			db.LockApply()
+			db.LockApply(viper.GetDuration("lock.timeout"))
 			db.CreateHistTables()
 			return
 		}
 		// only one apply runs against a schema at a time - a concurrent apply waits here
-		db.LockApply()
+		db.LockApply(viper.GetDuration("lock.timeout"))
 		if hist {
 			db.CreateHistTables()
 		} else if baseline {
@@ -167,6 +170,8 @@ func init() {
 	applyCmd.Flags().BoolVar(&statesql, "sql", false, "Only apply the sql files that are part of the state definition")
 	applyCmd.Flags().Bool("state-transaction", true, "Apply the state build (and --sql) in a single transaction - set to false when a state sql file cannot run inside a transaction - overrides the config file value")
 	viper.BindPFlag("state.transaction", applyCmd.Flags().Lookup("state-transaction"))
+	applyCmd.Flags().Duration("lock-timeout", 5*time.Minute, "How long to wait for another apply against the schema to finish (e.g. 30s, 15m) - 0 waits indefinitely - overrides the config file value")
+	viper.BindPFlag("lock.timeout", applyCmd.Flags().Lookup("lock-timeout"))
 }
 
 // pendingChangesetFiles returns the changeset files newer than the deployed version, in the order they are applied

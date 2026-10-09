@@ -339,6 +339,15 @@ that failed and was rolled back is recorded as `rolled back`, and the statements
 Only one `skima apply` runs against a schema at a time. Each apply takes a postgres advisory lock for the schema, so if two deploy jobs
 start together the second waits for the first to finish, then applies only what is still missing.
 
+The wait is bounded by `--lock-timeout` (default `5m`; `lock.timeout` in the config file, `SKM_LOCK_TIMEOUT` in the environment),
+which takes a duration such as `30s` or `15m` - `0` waits indefinitely. If the lock is still held when the timeout runs out, the apply
+exits with code 1 without changing anything, and reports which session holds the lock so a stuck apply can be found (skima's
+connections show up in `pg_stat_activity` with the application name `skima`):
+```
+Another skima apply is running against schema app1 (held by pid 128: skima on 10.2.0.14, connected for 2s) - waiting up to 5m0s
+ERROR: timed out after 5m0s waiting for the apply lock on schema app1 (held by pid 128: skima on 10.2.0.14, connected for 5m2s) - nothing was applied. Rerun once that apply finishes, or set a longer --lock-timeout
+```
+
 ### Configuration
 Configuration is managed across based on the idea of sane defaults and the ability to override based on how the values are set. The *Environment Variables* section above
 stated to provide some ideas about how this works.
