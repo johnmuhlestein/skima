@@ -112,54 +112,8 @@ func Connect() *PgPool {
 			os.Exit(1)
 		}
 		instance = &PgPool{pool: newPool}
-		migrateLegacyHistTables(newPool)
 	})
 	return instance
-}
-
-// renames the history tables (and their sequences/constraints) created when this tool was named perseus - runs as
-// a single statement so the rename either fully completes or not at all
-const legacyHistRename = `do $$
-begin
-  alter table perseus_schema_history rename to skima_schema_history;
-  if to_regclass('perseus_schema_history_run_id_seq') is not null then
-    alter sequence perseus_schema_history_run_id_seq rename to skima_schema_history_run_id_seq;
-  end if;
-  if to_regclass('perseus_schema_history_pkey') is not null then
-    alter index perseus_schema_history_pkey rename to skima_schema_history_pkey;
-  end if;
-  if to_regclass('perseus_schema_statements') is not null then
-    alter table perseus_schema_statements rename to skima_schema_statements;
-    if to_regclass('perseus_schema_statements_stmt_id_seq') is not null then
-      alter sequence perseus_schema_statements_stmt_id_seq rename to skima_schema_statements_stmt_id_seq;
-    end if;
-    if to_regclass('perseus_schema_statements_pkey') is not null then
-      alter index perseus_schema_statements_pkey rename to skima_schema_statements_pkey;
-    end if;
-    if exists (select 1 from pg_constraint where conname = 'perseus_hist_fk' and conrelid = 'skima_schema_statements'::regclass) then
-      alter table skima_schema_statements rename constraint perseus_hist_fk to skima_hist_fk;
-    end if;
-  end if;
-end $$`
-
-// migrateLegacyHistTables renames perseus_* history tables to skima_* so that schemas managed before the rename are
-// still recognized - otherwise they would look unmanaged and have their state re-applied
-func migrateLegacyHistTables(pool *pgxpool.Pool) {
-	var legacy, current bool
-	err := pool.QueryRow(context.Background(), "select to_regclass('perseus_schema_history') is not null, to_regclass('skima_schema_history') is not null").Scan(&legacy, &current)
-	if checkErr(err, "Unable to check for legacy perseus history tables:") {
-		os.Exit(1)
-	}
-	switch {
-	case legacy && current:
-		fmt.Fprintln(os.Stderr, "WARNING: both perseus_schema_history and skima_schema_history exist - using skima_schema_history and leaving the perseus tables untouched")
-	case legacy:
-		_, err = pool.Exec(context.Background(), legacyHistRename)
-		if checkErr(err, "Unable to rename the legacy perseus history tables to skima:") {
-			os.Exit(1)
-		}
-		fmt.Println("Renamed legacy perseus history tables to skima_schema_history and skima_schema_statements")
-	}
 }
 
 // role and schema names accepted by bootstrap - postgres' unquoted identifier rules, so the names behave the same whether

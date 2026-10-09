@@ -348,11 +348,6 @@ Another skima apply is running against schema app1 (held by pid 128: skima on 10
 ERROR: timed out after 5m0s waiting for the apply lock on schema app1 (held by pid 128: skima on 10.2.0.14, connected for 5m2s) - nothing was applied. Rerun once that apply finishes, or set a longer --lock-timeout
 ```
 
-Earlier versions of this tool named these tables `perseus_schema_history` and `perseus_schema_statements`. When skima connects
-to a schema that still has the `perseus_*` tables, it renames them (along with their sequences and constraints) to the `skima_*` names
-automatically, so existing history and the deployed version are preserved. If both sets of tables exist, skima uses the `skima_*` tables,
-leaves the `perseus_*` tables untouched and prints a warning.
-
 ### Configuration
 Configuration is managed across based on the idea of sane defaults and the ability to override based on how the values are set. The *Environment Variables* section above
 stated to provide some ideas about how this works.
