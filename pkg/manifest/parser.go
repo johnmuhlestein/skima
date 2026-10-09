@@ -584,8 +584,14 @@ func (sd SimpleDelta) GenerateDdl() string {
 		case "drop":
 			return fmt.Sprintf("drop function if exists %s", sd.Name)
 		case "add":
-			dat, err := reader.readFile(filepath.Join(viper.GetString("workdir"), "state", "sql", strings.Join([]string{sd.Name, "sql"}, ".")))
-			check(err, fmt.Sprintf("Unable to open the sql file for %s", sd.Name))
+			var dat []byte
+			var err error
+			for _, path := range FunctionFilePaths(viper.GetString("workdir"), sd.Name) {
+				if dat, err = reader.readFile(path); err == nil {
+					break
+				}
+			}
+			check(err, fmt.Sprintf("Unable to open the sql file for %s - expected %s", sd.Name, strings.Join(FunctionFilePaths("", sd.Name), " or ")))
 			return string(dat)
 		}
 	case "index":
@@ -622,6 +628,15 @@ func (sd SimpleDelta) GenerateDdl() string {
 		}
 	}
 	return ""
+}
+
+// FunctionFilePaths returns where a function delta's sql file can be, in lookup order: state/sql/pre (where the state
+// build also runs it) and then state/sql, where function files were originally read from
+func FunctionFilePaths(workdir string, name string) []string {
+	return []string{
+		filepath.Join(workdir, "state", "sql", "pre", name+".sql"),
+		filepath.Join(workdir, "state", "sql", name+".sql"),
+	}
 }
 
 func (sd SimpleDelta) StatementType() string {

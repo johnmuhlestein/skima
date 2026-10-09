@@ -144,7 +144,7 @@ func TestValidateManifest(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	results, err := ValidateManifest(workdir)
+	results, err := ValidateManifest(workdir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
