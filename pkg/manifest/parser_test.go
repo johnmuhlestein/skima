@@ -448,3 +448,26 @@ func TestChangeSet_InTransaction(t *testing.T) {
 		}
 	}
 }
+
+func TestListFiles(t *testing.T) {
+	reader = osReadWrapper{}
+	dir := t.TempDir()
+	for _, name := range []string{"v1_0_1.json", "v1_0_2.json", "notes.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files, err := ListFiles(dir, "json")
+	if err != nil || len(files) != 2 {
+		t.Errorf("EXPECTED 2 json files  ACTUAL: %v (err %v)", files, err)
+	}
+	// a missing directory has no files
+	files, err = ListFiles(filepath.Join(dir, "missing"), "json")
+	if err != nil || len(files) != 0 {
+		t.Errorf("missing directory - EXPECTED no files and no error  ACTUAL: %v (err %v)", files, err)
+	}
+	// any other read error is returned rather than treated as an empty directory
+	if _, err = ListFiles(filepath.Join(dir, "notes.txt"), "json"); err == nil {
+		t.Error("reading a file as a directory - EXPECTED an error  ACTUAL: nil")
+	}
+}
