@@ -223,7 +223,9 @@ If any of them fails, the whole changeset is rolled back, the schema stays at th
 `rolled back` status. Fix the changeset and run `skima apply` again.
 
 Errors that skima tolerates (for example dropping a foreign key that does not exist, or the `bypass` codes of a SQL delta) do not
-abort the transaction - each statement runs in its own savepoint.
+abort the transaction - each statement runs in its own savepoint. A missing table is only tolerated by drop deltas, since the
+object is gone either way - adding to, altering or renaming in a table that does not exist fails the changeset. `skima plan`
+lists the codes each step tolerates.
 
 Some statements cannot run inside a transaction, such as `create index concurrently`. A changeset containing them can opt out of the
 transaction - its deltas are then applied one at a time, and a failure part way through leaves the earlier deltas in place.
@@ -282,7 +284,7 @@ Plan for schema app1: deployed 1.0.1 -> 1.0.3 (2 changesets, 11 statements)
 -- require a document type
 -- [1] pre-hook alter column documents.document_type
 update documents set document_type = 'UNSTRUCTURED' where document_type is null;
--- [1] alter column documents.document_type  (tolerates 42P07, 42710, 42P01)
+-- [1] alter column documents.document_type  (tolerates 42P07, 42710)
 alter table documents alter column document_type set NOT NULL;
 -- [6] script tidy up orphaned tags
 --   runs deltas/scripts/cleanup_tags.sql (--show-scripts prints it)

@@ -357,14 +357,16 @@ func describe(delta manifest.Delta) string {
 	return fmt.Sprintf("%s %s %s", action, object, strings.TrimPrefix(delta.Describe(), action+" "))
 }
 
-// deltaTolerates returns the error codes apply treats as success for a delta's statement
+// deltaTolerates returns the error codes apply treats as success for a delta's statement: an object that already
+// exists, a column already renamed, and for a drop an object - or the table it belongs to - that is already gone. A
+// missing table is not tolerated otherwise - adding to, altering or renaming in a table that does not exist fails
 func deltaTolerates(statementType string) []string {
-	codes := []string{codeDuplicateTable, codeDuplicateObject, codeUndefinedTable}
+	codes := []string{codeDuplicateTable, codeDuplicateObject}
 	if strings.Contains(statementType, "rename") {
 		codes = append(codes, codeUndefinedColumn)
 	}
 	if strings.Contains(statementType, "drop") {
-		codes = append(codes, codeUndefinedObject)
+		codes = append(codes, codeUndefinedObject, codeUndefinedTable)
 	}
 	return codes
 }

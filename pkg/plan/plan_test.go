@@ -248,3 +248,22 @@ func TestHookedDeltas(t *testing.T) {
 		t.Error("SqlDelta should not support pre/post hooks")
 	}
 }
+
+// a missing table (42P01) is tolerated only by drops - the object is gone either way. Anything else that needs the
+// table fails when it is missing
+func TestDeltaTolerates(t *testing.T) {
+	for statementType, expected := range map[string]string{
+		"delta add column":    "42P07,42710",
+		"delta alter column":  "42P07,42710",
+		"delta add view":      "42P07,42710",
+		"delta add fk":        "42P07,42710",
+		"delta rename column": "42P07,42710,42703",
+		"delta drop table":    "42P07,42710,42704,42P01",
+		"delta drop column":   "42P07,42710,42704,42P01",
+		"delta drop fk":       "42P07,42710,42704,42P01",
+	} {
+		if actual := strings.Join(deltaTolerates(statementType), ","); actual != expected {
+			t.Errorf("%s: EXPECTED %s  ACTUAL: %s", statementType, expected, actual)
+		}
+	}
+}

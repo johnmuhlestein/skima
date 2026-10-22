@@ -4,13 +4,13 @@ Plan for schema app1: deployed 1.0.0 -> 1.0.3 (3 changesets, 16 statements)
 -- tag documents and track their priority
 -- [1] table tags
 create table if not exists tags (id integer primary key generated always as identity,document_id uuid not null,label text not null);
--- [2] add column documents.priority  (tolerates 42P07, 42710, 42P01)
+-- [2] add column documents.priority  (tolerates 42P07, 42710)
 alter table documents add column if not exists priority integer default 0;
 -- [2] post-hook add column documents.priority
 --   deltas/scripts/backfill_priority.sql:
 update documents set priority = 1 where document_type = 'STRUCTURED';
 update documents set priority = 0 where priority is null;
--- [3] add index documents.documents_type_idx  (tolerates 42P07, 42710, 42P01)
+-- [3] add index documents.documents_type_idx  (tolerates 42P07, 42710)
 create  index if not exists documents_type_idx on documents (document_type);
 -- [end] fk tags.tags_document_fk  (deferred to the end of the changeset; tolerates 42710)
 alter table tags add constraint tags_document_fk foreign key (document_id) references documents (id);
@@ -19,13 +19,13 @@ alter table tags add constraint tags_document_fk foreign key (document_id) refer
 -- require a document type
 -- [1] pre-hook alter column documents.document_type
 update documents set document_type = 'UNSTRUCTURED' where document_type is null;
--- [1] alter column documents.document_type  (tolerates 42P07, 42710, 42P01)
+-- [1] alter column documents.document_type  (tolerates 42P07, 42710)
 alter table documents alter column document_type set NOT NULL;
--- [2] add constraint documents.documents_document_type_check  (tolerates 42P07, 42710, 42P01)
+-- [2] add constraint documents.documents_document_type_check  (tolerates 42P07, 42710)
 alter table documents add constraint documents_document_type_check check (document_type in ('STRUCTURED','UNSTRUCTURED'));
--- [3] rename column documents.location  (tolerates 42P07, 42710, 42P01, 42703)
+-- [3] rename column documents.location  (tolerates 42P07, 42710, 42703)
 alter table documents rename column location to file_location;
--- [4] drop fk documents.documents_old_fk  (tolerates 42P07, 42710, 42P01, 42704)
+-- [4] drop fk documents.documents_old_fk  (tolerates 42P07, 42710, 42704, 42P01)
 alter table documents drop constraint documents_old_fk;
 -- [5] script seed the default tags  (tolerates 23505)
 insert into tags (document_id, label) select id, 'new' from documents;
@@ -38,7 +38,7 @@ delete from tags t where not exists (select 1 from documents d where d.id = t.do
 -- index without locking and refresh the view
 -- [1] script concurrent label index
 create index concurrently if not exists tags_label_idx on tags (label);
--- [2] add function update_last_modified_at  (tolerates 42P07, 42710, 42P01)
+-- [2] add function update_last_modified_at  (tolerates 42P07, 42710)
 --   state/sql/pre/update_last_modified_at.sql:
 create or replace function update_last_modified_at() returns trigger language plpgsql as $$
 begin
@@ -46,7 +46,7 @@ begin
   return new;
 end;
 $$;
--- [3] add view project_documents  (tolerates 42P07, 42710, 42P01)
+-- [3] add view project_documents  (tolerates 42P07, 42710)
 create or replace view project_documents (project_name,document_id,document_type) as select p.name, d.id, d.document_type from projects p join documents d on d.project_id = p.id;
 
 WARNING: changeset 1.0.3 runs without a transaction - a failure part way through leaves the earlier deltas in place

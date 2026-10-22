@@ -94,15 +94,22 @@ func TestChangesetStopsAtFirstFailure(t *testing.T) {
 }
 
 func TestToleratedErrors(t *testing.T) {
+	// the codes the planner gives an add and a drop delta - only a drop tolerates a missing table (42P01)
+	add := []string{"42P07", "42710"}
+	drop := []string{"42P07", "42710", "42704", "42P01"}
 	failures, _, hist, _ := execute(
-		[]plan.Step{deltaStep("exists", "42P07", "42710", "42P01"), deltaStep("missing_table", "42P07", "42710", "42P01")},
-		map[string][]error{"exists": {pgError("42710")}, "missing_table": {pgError("42P01")}})
-	// 42P01 is tolerated on every delta, as before plans were executed
+		[]plan.Step{deltaStep("exists", add...), deltaStep("dropped_table", drop...)},
+		map[string][]error{"exists": {pgError("42710")}, "dropped_table": {pgError("42P01")}})
 	if failures != 0 || hist.count("success") != 2 {
 		t.Errorf("EXPECTED both tolerated errors to succeed  ACTUAL: %d failures, rows %v", failures, hist.rows)
 	}
 	if hist.rows[0].desc != "add t.exists" {
 		t.Errorf("EXPECTED a tolerated step described by its name  ACTUAL: %v", hist.rows[0])
+	}
+
+	failures, _, hist, history := execute([]plan.Step{deltaStep("missing_table", add...)}, map[string][]error{"missing_table": {pgError("42P01")}})
+	if failures != 1 || history.Status != "fast-fail" || hist.rows[0].status != "failed" {
+		t.Errorf("EXPECTED an add to a missing table to fail the changeset  ACTUAL: %d failures, status %s, rows %v", failures, history.Status, hist.rows)
 	}
 }
 
