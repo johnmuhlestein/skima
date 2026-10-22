@@ -201,3 +201,15 @@ func TestReadmeExamplesValid(t *testing.T) {
 		}
 	}
 }
+
+func TestCompareLocations(t *testing.T) {
+	ordered := []string{"", "/columns", "/columns/0", "/columns/0/name", "/columns/2", "/columns/10", "/deltas/2/action", "/deltas/2/on", "/name"}
+	for i := 1; i < len(ordered); i++ {
+		if compareLocations(ordered[i-1], ordered[i]) >= 0 || compareLocations(ordered[i], ordered[i-1]) <= 0 {
+			t.Errorf("EXPECTED %q before %q", ordered[i-1], ordered[i])
+		}
+	}
+	if compareLocations("/deltas/1", "/deltas/1") != 0 {
+		t.Error("EXPECTED equal locations to compare equal")
+	}
+}

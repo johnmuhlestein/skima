@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"bytes"
+	"cmp"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"skima/pkg/util"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -170,6 +172,13 @@ func validateSchema(path string, kind FileKind) FileValidation {
 	case err == nil:
 	case errors.As(err, &validationErr):
 		result.Issues = leafIssues(validationErr, message.NewPrinter(language.English), nil)
+		// the validator does not report the problems in a fixed order - list them in the order they appear in the file
+		sort.SliceStable(result.Issues, func(i, j int) bool {
+			if c := compareLocations(result.Issues[i].Location, result.Issues[j].Location); c != 0 {
+				return c < 0
+			}
+			return result.Issues[i].Message < result.Issues[j].Message
+		})
 	default:
 		result.Issues = []ValidationIssue{{Message: err.Error()}}
 	}
@@ -215,6 +224,24 @@ func leafIssues(err *jsonschema.ValidationError, printer *message.Printer, issue
 		issues = leafIssues(cause, printer, issues)
 	}
 	return issues
+}
+
+// compareLocations orders JSON pointers by their tokens, comparing array indexes as numbers so /deltas/2 comes before
+// /deltas/10
+func compareLocations(a string, b string) int {
+	at, bt := strings.Split(a, "/"), strings.Split(b, "/")
+	for i := 0; i < len(at) && i < len(bt); i++ {
+		ai, aErr := strconv.Atoi(at[i])
+		bi, bErr := strconv.Atoi(bt[i])
+		if aErr == nil && bErr == nil {
+			if ai != bi {
+				return cmp.Compare(ai, bi)
+			}
+		} else if at[i] != bt[i] {
+			return strings.Compare(at[i], bt[i])
+		}
+	}
+	return cmp.Compare(len(at), len(bt))
 }
 
 // syntaxErrorMessage adds the line and column of a JSON syntax error

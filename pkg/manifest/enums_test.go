@@ -96,7 +96,7 @@ func TestEnumValidation(t *testing.T) {
 	}
 	expectIssues(t, results, "doc_status-enum.json")
 	expectIssues(t, results, "wrong-enum.json", "error /name: name 'other' does not match the file name - deltas load this file as enum 'wrong'")
-	expectIssues(t, results, "dupes-enum.json", "error /values: items at 0 and 1 are equal", "error : additional properties 'labels' not allowed")
+	expectIssues(t, results, "dupes-enum.json", "error : additional properties 'labels' not allowed", "error /values: items at 0 and 1 are equal")
 	expectIssues(t, results, "empty-enum.json", "error /values: minItems")
 	expectIssues(t, results, "v1_0_1.json",
 		"error /deltas/2/value: enum 'doc_status' has no value 'archived' in state/doc_status-enum.json",
