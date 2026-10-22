@@ -1,0 +1,12 @@
+{
+  "description": "index without locking and refresh the view",
+  "transaction": false,
+  "deltas": [
+    {
+      "object": "script", "description": "concurrent label index",
+      "sql": ["create index concurrently if not exists tags_label_idx on tags (label)"]
+    },
+    { "object": "function", "action": "add", "name": "update_last_modified_at" },
+    { "object": "view", "action": "add", "name": "project_documents" }
+  ]
+}

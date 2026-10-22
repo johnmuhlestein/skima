@@ -21,6 +21,7 @@ var baseline bool
 var baselineVersion string
 var skipValidation bool
 var statesql bool
+var dryRun bool
 var activeApplyHist db.ApplyHistory
 var manifestVersion util.SemanticVersion
 
@@ -49,6 +50,8 @@ that, the second exits without applying anything and reports which session holds
 Before anything is applied, the state files and the pending changesets are validated against the skima JSON schemas
 (see skima manifest validate --help). If any is invalid nothing is applied - use --skip-validation to bypass the check.
 
+Use --dry-run to see what would be applied without changing anything - the same as skima plan (see skima plan --help).
+
 This behavior assumes that there is a defined schema, a user has been bound to that schema as the default search path and that the skima 
 schema management tables exist.
 
@@ -66,6 +69,10 @@ This does the following:
   4. sets the search path for the user to ONLY the new schema
 `,
 	Run: func(cmd *cobra.Command, args []string) {
+		if dryRun {
+			runPlan("")
+			return
+		}
 		manifestVersion = manifest.Version()
 		var failures int
 		if bootstrap {
@@ -166,12 +173,16 @@ func init() {
 	applyCmd.Flags().BoolVar(&baseline, "baseline", false, "Takes an existing schema that is not managed by skima and sets up the history tables and sets an initial")
 	applyCmd.Flags().StringVar(&baselineVersion, "baseline-version", "1.0.0", "The version to apply to the baseline - 1.0.0 by default")
 	applyCmd.MarkFlagsMutuallyExclusive("bootstrap", "hist", "baseline")
+	applyCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be applied without changing the database - the same as skima plan")
 	applyCmd.Flags().BoolVar(&skipValidation, "skip-validation", false, "Apply without first validating the manifest files against the skima JSON schemas")
 	applyCmd.Flags().BoolVar(&statesql, "sql", false, "Only apply the sql files that are part of the state definition")
 	applyCmd.Flags().Bool("state-transaction", true, "Apply the state build (and --sql) in a single transaction - set to false when a state sql file cannot run inside a transaction - overrides the config file value")
 	viper.BindPFlag("state.transaction", applyCmd.Flags().Lookup("state-transaction"))
 	applyCmd.Flags().Duration("lock-timeout", 5*time.Minute, "How long to wait for another apply against the schema to finish (e.g. 30s, 15m) - 0 waits indefinitely - overrides the config file value")
 	viper.BindPFlag("lock.timeout", applyCmd.Flags().Lookup("lock-timeout"))
+	for _, flag := range []string{"bootstrap", "hist", "baseline", "sql"} {
+		applyCmd.MarkFlagsMutuallyExclusive("dry-run", flag)
+	}
 }
 
 // pendingChangesetFiles returns the changeset files newer than the deployed version, in the order they are applied

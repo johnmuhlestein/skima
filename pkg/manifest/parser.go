@@ -436,22 +436,30 @@ func (fk FkDelta) Describe() string {
 }
 
 func (col ColumnDelta) GenerateDdl() string {
+	ddl, err := col.Ddl()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ALTER COLUMN datatype failure due to not being able to parse table reference: %s", err)
+		return ""
+	}
+	return ddl
+}
+
+// Ddl generates the delta's statement, returning an error if the reference table's state file cannot be read
+func (col ColumnDelta) Ddl() (string, error) {
 	if col.Definition.Name != "" {
-		return col.Definition.AlterStmt(col.Reference, col.Action)
+		return col.Definition.AlterStmt(col.Reference, col.Action), nil
 	}
 	refTable, err := ParseTableByName(col.Reference)
 	var refColumn Column
 	var defaultString string
-	if err == nil {
-		for _, rc := range refTable.Columns {
-			if rc.Name == col.Name {
-				refColumn = rc
-				defaultString = refColumn.defaultBuilder()
-			}
+	if err != nil {
+		return "", err
+	}
+	for _, rc := range refTable.Columns {
+		if rc.Name == col.Name {
+			refColumn = rc
+			defaultString = refColumn.defaultBuilder()
 		}
-	} else {
-		fmt.Fprintf(os.Stderr, "ALTER COLUMN datatype failure due to not being able to parse table reference: %s", err)
-		return ""
 	}
 	builder := strings.Builder{}
 	fmt.Fprintf(&builder, "alter table %s alter column %s ", col.Reference, col.Name)
@@ -471,7 +479,7 @@ func (col ColumnDelta) GenerateDdl() string {
 			builder.WriteString("drop default")
 		}
 	}
-	return builder.String()
+	return builder.String(), nil
 }
 
 func (col ColumnDelta) StatementType() string {
@@ -493,139 +501,204 @@ func (sd SimpleDelta) Table() Table {
 }
 
 func (sd SimpleDelta) GenerateDdl() string {
+	ddl, err := sd.Ddl()
+	var missing *MissingDefinitionError
+	if errors.As(err, &missing) {
+		fmt.Fprintln(os.Stderr, missing)
+		return ""
+	}
+	if err != nil {
+		check(err, err.Error())
+	}
+	return ddl
+}
+
+// MissingDefinitionError reports a delta whose definition is not in the state files, so it generates no DDL - the
+// apply skips such a delta rather than failing
+type MissingDefinitionError struct {
+	msg string
+}
+
+func (e *MissingDefinitionError) Error() string {
+	return e.msg
+}
+
+func missingDefinition(format string, args ...any) error {
+	return &MissingDefinitionError{msg: fmt.Sprintf(format, args...)}
+}
+
+// Ddl generates the delta's statement. It returns a *MissingDefinitionError when the definition it reads from the state
+// files is not there, and other errors when a state or sql file cannot be read. An object/action skima does not
+// support generates an empty statement and no error
+func (sd SimpleDelta) Ddl() (string, error) {
 	switch sd.Object {
 	case "table":
 		if sd.Action == "add" {
 			t, err := ParseTableByName(sd.Name)
-			check(err, fmt.Sprintf("Unable to parse the table %s", sd.Name))
-			return t.GenerateDdl()
+			if err != nil {
+				return "", fmt.Errorf("Unable to parse the table %s: %w", sd.Name, err)
+			}
+			return t.GenerateDdl(), nil
 		} else if sd.Action == "drop" {
-			return fmt.Sprintf(dropTableTmpl, sd.Name)
+			return fmt.Sprintf(dropTableTmpl, sd.Name), nil
 		}
 	case "view":
 		switch sd.Action {
 		case "add":
 			v, err := ParseViewByName(sd.Name)
-			check(err, fmt.Sprintf("Unable to parse the view %s", sd.Name))
-			return v.GenerateDdl()
+			if err != nil {
+				return "", fmt.Errorf("Unable to parse the view %s: %w", sd.Name, err)
+			}
+			return v.GenerateDdl(), nil
 		case "drop":
-			return fmt.Sprintf("drop view if exists %s", sd.Name)
+			return fmt.Sprintf("drop view if exists %s", sd.Name), nil
 		}
 	case "column":
 		switch sd.Action {
 		case "drop":
-			return fmt.Sprintf(dropColTmpl, sd.Reference, sd.Name)
+			return fmt.Sprintf(dropColTmpl, sd.Reference, sd.Name), nil
 		case "rename":
-			return fmt.Sprintf(colRenameTmpl, sd.Reference, sd.Name, sd.NewName)
+			return fmt.Sprintf(colRenameTmpl, sd.Reference, sd.Name, sd.NewName), nil
 		case "add":
-			if len(sd.Reference) > 0 {
-				t, err := ParseTableByName(sd.Reference)
-				check(err, fmt.Sprintf("Unable to parse the reference table %s", sd.Reference))
-				for _, col := range t.Columns {
-					if col.Name == sd.Name {
-						return col.AlterStmt(t.Name, sd.Action)
-					}
-				}
-				fmt.Fprintf(os.Stderr, "Table %s did not have a column definition matching %s\n", sd.Reference, sd.Name)
-			} else {
-				fmt.Fprintf(os.Stderr, "cannot add column %s as a simple delta without a reference value\n", sd.Name)
+			if len(sd.Reference) == 0 {
+				return "", missingDefinition("cannot add column %s as a simple delta without a reference value", sd.Name)
 			}
+			t, err := sd.referenceTable()
+			if err != nil {
+				return "", err
+			}
+			for _, col := range t.Columns {
+				if col.Name == sd.Name {
+					return col.AlterStmt(t.Name, sd.Action), nil
+				}
+			}
+			return "", missingDefinition("Table %s did not have a column definition matching %s", sd.Reference, sd.Name)
 		}
 	case "fk":
 		switch sd.Action {
 		case "drop":
-			return fmt.Sprintf(dropFkTmpl, sd.Reference, sd.Name)
+			return fmt.Sprintf(dropFkTmpl, sd.Reference, sd.Name), nil
 		case "add":
 			if len(sd.Reference) > 0 {
-				t, err := ParseTableByName(sd.Reference)
-				check(err, fmt.Sprintf("Unable to parse the reference table %s", sd.Reference))
+				t, err := sd.referenceTable()
+				if err != nil {
+					return "", err
+				}
 				for _, fk := range t.ForeignKeys {
 					if fk.Name == sd.Name {
-						return fk.AlterStmt(t.Name, sd.Action)
+						return fk.AlterStmt(t.Name, sd.Action), nil
 					}
 				}
-				fmt.Fprintf(os.Stderr, "Table %s did not have a foreign key definition matching %s\n", sd.Reference, sd.Name)
+				return "", missingDefinition("Table %s did not have a foreign key definition matching %s", sd.Reference, sd.Name)
 			}
 		}
 	case "pk":
 		switch sd.Action {
 		case "drop":
-			return fmt.Sprintf(dropFkTmpl, sd.Reference, sd.Name)
+			return fmt.Sprintf(dropFkTmpl, sd.Reference, sd.Name), nil
 		case "add":
 			if len(sd.Reference) > 0 {
-				t, err := ParseTableByName(sd.Reference)
-				check(err, fmt.Sprintf("Unable to parse the reference table %s", sd.Reference))
-				if (t.PrimaryKey == nil) || (len(t.PrimaryKey) == 0) {
+				t, err := sd.referenceTable()
+				if err != nil {
+					return "", err
+				}
+				if len(t.PrimaryKey) == 0 {
 					fmt.Fprintf(os.Stderr, "Table %s did not have a primary key definition\n", sd.Reference)
 				}
-				return fmt.Sprintf("alter table %s add constraint %s primary key (%s)", sd.Reference, sd.Name, strings.Join(t.PrimaryKey, ", "))
+				return fmt.Sprintf("alter table %s add constraint %s primary key (%s)", sd.Reference, sd.Name, strings.Join(t.PrimaryKey, ", ")), nil
 			}
 		}
 	case "trigger":
 		switch sd.Action {
 		case "drop":
-			return fmt.Sprintf(dropTriggerTmpl, sd.Name, sd.Reference)
+			return fmt.Sprintf(dropTriggerTmpl, sd.Name, sd.Reference), nil
 		case "add":
 			if len(sd.Reference) > 0 {
-				t, err := ParseTableByName(sd.Reference)
-				check(err, fmt.Sprintf("Unable to parse the reference table %s", sd.Reference))
+				t, err := sd.referenceTable()
+				if err != nil {
+					return "", err
+				}
 				for _, trg := range t.Triggers {
 					if trg.Name == sd.Name {
-						return trg.Ddl
+						return trg.Ddl, nil
 					}
 				}
-				fmt.Fprintf(os.Stderr, "Table %s did not have a trigger definition matching %s\n", sd.Reference, sd.Name)
+				return "", missingDefinition("Table %s did not have a trigger definition matching %s", sd.Reference, sd.Name)
 			}
 		}
 	case "function":
 		switch sd.Action {
 		case "drop":
-			return fmt.Sprintf("drop function if exists %s", sd.Name)
+			return fmt.Sprintf("drop function if exists %s", sd.Name), nil
 		case "add":
-			var dat []byte
-			var err error
-			for _, path := range FunctionFilePaths(viper.GetString("workdir"), sd.Name) {
-				if dat, err = reader.readFile(path); err == nil {
-					break
-				}
+			path, err := sd.FunctionFile()
+			if err != nil {
+				return "", err
 			}
-			check(err, fmt.Sprintf("Unable to open the sql file for %s - expected %s", sd.Name, strings.Join(FunctionFilePaths("", sd.Name), " or ")))
-			return string(dat)
+			dat, err := reader.readFile(path)
+			if err != nil {
+				return "", fmt.Errorf("Unable to open the sql file for %s - expected %s: %w", sd.Name, strings.Join(FunctionFilePaths("", sd.Name), " or "), err)
+			}
+			return string(dat), nil
 		}
 	case "index":
 		switch sd.Action {
 		case "drop":
-			return fmt.Sprintf(dropIndexTmpl, sd.Name)
+			return fmt.Sprintf(dropIndexTmpl, sd.Name), nil
 		case "add":
 			if len(sd.Reference) > 0 {
-				t, err := ParseTableByName(sd.Reference)
-				check(err, fmt.Sprintf("Unable to parse the reference table %s", sd.Reference))
+				t, err := sd.referenceTable()
+				if err != nil {
+					return "", err
+				}
 				for _, idx := range t.Indexes {
 					if idx.Name == sd.Name {
-						return idx.GenerateDdl(sd.Reference)
+						return idx.GenerateDdl(sd.Reference), nil
 					}
 				}
-				fmt.Fprintf(os.Stderr, "Table %s did not have a index definition matching %s\n", sd.Reference, sd.Name)
+				return "", missingDefinition("Table %s did not have a index definition matching %s", sd.Reference, sd.Name)
 			}
 		}
 	case "constraint":
 		switch sd.Action {
 		case "drop":
-			return fmt.Sprintf("alter table %s drop constraint if exists %s", sd.Reference, sd.Name)
+			return fmt.Sprintf("alter table %s drop constraint if exists %s", sd.Reference, sd.Name), nil
 		case "add":
 			if len(sd.Reference) > 0 {
-				t, err := ParseTableByName(sd.Reference)
-				check(err, fmt.Sprintf("Unable to parse the reference table %s", sd.Reference))
+				t, err := sd.referenceTable()
+				if err != nil {
+					return "", err
+				}
 				for _, cons := range t.Constraints {
 					if cons.Name == sd.Name {
-						return cons.GenerateDdl(sd.Reference)
+						return cons.GenerateDdl(sd.Reference), nil
 					}
 				}
-				fmt.Fprintf(os.Stderr, "Table %s did not have an constraint definition matching %s\n", sd.Reference, sd.Name)
+				return "", missingDefinition("Table %s did not have an constraint definition matching %s", sd.Reference, sd.Name)
 			}
 		}
 	}
-	return ""
+	return "", nil
+}
+
+func (sd SimpleDelta) referenceTable() (Table, error) {
+	t, err := ParseTableByName(sd.Reference)
+	if err != nil {
+		return t, fmt.Errorf("Unable to parse the reference table %s: %w", sd.Reference, err)
+	}
+	return t, nil
+}
+
+// FunctionFile returns the sql file a function add delta runs - the first of FunctionFilePaths that exists. When none
+// can be read it returns the error reading the last of them
+func (sd SimpleDelta) FunctionFile() (string, error) {
+	var err error
+	for _, path := range FunctionFilePaths(viper.GetString("workdir"), sd.Name) {
+		if _, err = reader.readFile(path); err == nil {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("Unable to open the sql file for %s - expected %s: %w", sd.Name, strings.Join(FunctionFilePaths("", sd.Name), " or "), err)
 }
 
 // FunctionFilePaths returns where a function delta's sql file can be, in lookup order: state/sql/pre (where the state
@@ -672,6 +745,50 @@ func (sd SqlDelta) GenerateDdl() string {
 		}
 	}
 	return sd.Sql[0]
+}
+
+// ScriptPath returns where a script delta or hook's sql file is - in the deltas/scripts directory
+func ScriptPath(workdir string, script string) string {
+	return filepath.Join(workdir, "deltas", "scripts", script)
+}
+
+// readScript reads a script file, returning an error if it is missing or empty - applying it would fail
+func readScript(script string) (string, error) {
+	dat, err := reader.readFile(ScriptPath(viper.GetString("workdir"), script))
+	if err != nil {
+		return "", fmt.Errorf("unable to read the script %s: %w", script, err)
+	}
+	if len(dat) == 0 {
+		return "", fmt.Errorf("the script %s is empty", script)
+	}
+	return string(dat), nil
+}
+
+// Statements returns every statement the delta runs - its sql, or the contents of its script file as one statement
+func (sd SqlDelta) Statements() ([]string, error) {
+	if len(sd.Script) > 0 {
+		script, err := readScript(sd.Script)
+		if err != nil {
+			return nil, err
+		}
+		return []string{script}, nil
+	}
+	return sd.Sql, nil
+}
+
+// Statements returns the hook's sql, or the contents of its script file as one statement when it has no sql
+func (hook Hook) Statements() ([]string, error) {
+	if len(hook.Sql) > 0 {
+		return hook.Sql, nil
+	}
+	if len(hook.Script) > 0 {
+		script, err := readScript(hook.Script)
+		if err != nil {
+			return nil, err
+		}
+		return []string{script}, nil
+	}
+	return nil, nil
 }
 
 // Hooks returns the pre/post hooks - promoted to every delta type that embeds PrePostHook

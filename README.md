@@ -270,6 +270,36 @@ inspecting the manifest (where the schema/changes are defined)
 As a command line tool, skima has a built-in help system, at the top level you can simply type `skima help` to view the full
 list of top level commands and at each sub command you can use `-h, --help` i.e. `skima [command] --help`
 
+### Planning an apply
+`skima plan` (or `skima apply --dry-run`) shows every statement `skima apply` would run, in the order it runs them,
+without changing anything:
+
+```
+skima plan --from 1.0.1
+Plan for schema app1: deployed 1.0.1 -> 1.0.3 (2 changesets, 11 statements)
+
+== changeset 1.0.2  deltas/v1_0_2.json  [transaction]
+-- require a document type
+-- [1] pre-hook alter column documents.document_type
+update documents set document_type = 'UNSTRUCTURED' where document_type is null;
+-- [1] alter column documents.document_type  (tolerates 42P07, 42710, 42P01)
+alter table documents alter column document_type set NOT NULL;
+-- [6] script tidy up orphaned tags
+--   runs deltas/scripts/cleanup_tags.sql (--show-scripts prints it)
+...
+```
+
+* By default plan connects to the database to read the deployed version. It only reads - it takes no apply lock and
+  records no history. If skima does not manage the schema yet, the plan is the state build
+* `--from <version>` plans the changesets newer than that version without connecting to a database, e.g. in a pull
+  request check. `--from none` plans the state build of a new schema
+* Each step's comment has its delta number in the changeset, what it does and the postgres error codes apply treats
+  as success for it. Foreign keys of tables added by a changeset are marked `[end]` - apply adds them after every delta
+* Steps that run a sql file name it - `--show-scripts` prints its contents
+* `--output=json` gives a machine readable plan, with the sql of every step
+* Like apply, plan validates the manifest first and fails if it is invalid (`--skip-validation` plans anyway)
+* The exit code is 0, or 1 on an error. With `--detailed-exitcode` it is 2 when there are changes to apply
+
 ### Validating the manifest
 Every manifest file is checked against a JSON schema for its kind - tables, views and changesets. Validation catches
 misspelled or unknown properties (property names are case sensitive and lowercase, as documented below), missing required
