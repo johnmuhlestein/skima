@@ -59,12 +59,37 @@ type Step struct {
 	// Skipped is set when the delta generates no statement - apply records it as skipped and does not run its post hook
 	Skipped bool   `json:"skipped,omitempty"`
 	Note    string `json:"note,omitempty"`
+	// StopOnFailure stops the run when the step fails - every changeset step, and the state build's pre sql files that
+	// the rest of the build depends on. Other state build steps fail without stopping, so one run reports every failure
+	StopOnFailure bool `json:"-"`
+	// Record is how apply records the step in the skima_schema_statements history table
+	Record Record `json:"-"`
 }
+
+// Record is how apply records a step in the skima_schema_statements history table
+type Record struct {
+	// Type is the statement type, e.g. "Create Table" or "delta add column"
+	Type string
+	// FailType is the statement type when the step fails, if it differs from Type
+	FailType string
+	// Name is the description of the step when it succeeds
+	Name string
+	// PerStatement records each statement on its own, as "<Type> sql [<index>]" described by the statement - used for
+	// sql deltas and hooks
+	PerStatement bool
+}
+
+// Unit kinds
+const (
+	UnitState     = "state"
+	UnitStateSql  = "sql" // the state build's pre sql files, applied on their own by apply --sql
+	UnitChangeset = "changeset"
+)
 
 // Unit is one apply run: the state build or a changeset. Each is recorded as a run in the history tables and, unless
 // it opts out, applied in a single transaction
 type Unit struct {
-	Kind          string               `json:"kind"` // state or changeset
+	Kind          string               `json:"kind"` // state, sql or changeset
 	SemVer        util.SemanticVersion `json:"-"`
 	Version       string               `json:"version"`
 	File          string               `json:"file,omitempty"`
@@ -105,10 +130,11 @@ func (p Plan) Statements() int {
 // foreign keys, views and post sql files. transactional is the state.transaction setting
 func ForState(transactional bool) (Plan, error) {
 	version := manifest.Version()
-	unit := Unit{Kind: "state", SemVer: version, Version: version.String(), Transactional: transactional}
+	unit := Unit{Kind: UnitState, SemVer: version, Version: version.String(), Transactional: transactional}
 	workdir := viper.GetString("workdir")
 
-	pre, err := sqlFileSteps("pre")
+	// the rest of the build depends on the pre sql files, e.g. trigger functions
+	pre, err := sqlFileSteps("pre", true)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -139,10 +165,11 @@ func ForState(transactional bool) (Plan, error) {
 		if err != nil {
 			return Plan{}, fmt.Errorf("unable to parse %s: %w", relative(path), err)
 		}
-		unit.Steps = append(unit.Steps, Step{Kind: KindView, Describe: view.Name, Source: relative(path), Sql: []string{view.GenerateDdl()}, Retryable: true})
+		unit.Steps = append(unit.Steps, Step{Kind: KindView, Describe: view.Name, Source: relative(path), Sql: []string{view.GenerateDdl()}, Retryable: true,
+			Record: Record{Type: "Create View", Name: view.Name}})
 	}
 
-	post, err := sqlFileSteps("post")
+	post, err := sqlFileSteps("post", false)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -153,6 +180,17 @@ func ForState(transactional bool) (Plan, error) {
 		p.Warnings = append(p.Warnings, "the state build runs without a transaction (state.transaction is false) - a failure part way through leaves the earlier objects in place")
 	}
 	return p, nil
+}
+
+// ForStateSql plans apply --sql: only the state build's pre sql files, each applied even when an earlier one fails
+func ForStateSql(transactional bool) (Plan, error) {
+	steps, err := sqlFileSteps("pre", false)
+	if err != nil {
+		return Plan{}, err
+	}
+	version := manifest.Version()
+	unit := Unit{Kind: UnitStateSql, SemVer: version, Version: version.String(), Transactional: transactional, Steps: steps}
+	return Plan{Schema: viper.GetString("dbconn.schema"), To: unit.Version, Units: []Unit{unit}}, nil
 }
 
 // ForChangesets plans the changesets newer than the deployed version, in the order apply runs them
@@ -180,7 +218,7 @@ func changesetUnit(path string) (Unit, []string, error) {
 	if err != nil {
 		return Unit{}, nil, fmt.Errorf("unable to parse %s: %w", file, err)
 	}
-	unit := Unit{Kind: "changeset", SemVer: cs.SemVer, Version: cs.Version, File: file, Description: cs.Description, Transactional: cs.InTransaction()}
+	unit := Unit{Kind: UnitChangeset, SemVer: cs.SemVer, Version: cs.Version, File: file, Description: cs.Description, Transactional: cs.InTransaction()}
 	var warnings []string
 	if !unit.Transactional {
 		warnings = append(warnings, fmt.Sprintf("changeset %s runs without a transaction - a failure part way through leaves the earlier deltas in place", cs.Version))
@@ -192,8 +230,8 @@ func changesetUnit(path string) (Unit, []string, error) {
 		fail := func(err error) (Unit, []string, error) {
 			return Unit{}, nil, fmt.Errorf("%s: %w", source, err)
 		}
-		hooks, hooked := delta.(interface{ Hooks() manifest.PrePostHook })
-		if hooked {
+		hooks, isHooked := delta.(hooked)
+		if isHooked {
 			step, err := hookStep(KindPreHook, hooks.Hooks().Pre, delta, source, position)
 			if err != nil {
 				return fail(err)
@@ -234,7 +272,8 @@ func changesetUnit(path string) (Unit, []string, error) {
 			if err != nil {
 				// apply skips a column delta whose table cannot be read rather than failing
 				unit.Steps = append(unit.Steps, Step{Kind: KindDelta, Describe: describe(d), Source: source, Delta: position, Skipped: true,
-					Note: fmt.Sprintf("%s generates no DDL (unable to read the table %s: %s) - apply skips it", describe(d), d.Reference, err)})
+					Record: Record{Type: d.StatementType(), Name: d.Describe()},
+					Note:   fmt.Sprintf("%s generates no DDL (unable to read the table %s: %s) - apply skips it", describe(d), d.Reference, err)})
 				break
 			}
 			step, err := deltaStep(delta, ddl, nil, source, position)
@@ -247,9 +286,11 @@ func changesetUnit(path string) (Unit, []string, error) {
 			if err != nil {
 				return fail(err)
 			}
-			step := Step{Kind: KindScript, Describe: d.Describe(), Source: source, Delta: position, Sql: statements, Tolerate: d.Bypass}
+			step := Step{Kind: KindScript, Describe: d.Describe(), Source: source, Delta: position, Sql: statements, Tolerate: d.Bypass,
+				Record: Record{Type: "delta", PerStatement: true}}
 			if len(d.Script) > 0 {
 				step.Script = relative(manifest.ScriptPath(viper.GetString("workdir"), d.Script))
+				step.Record.Type = "delta script"
 			}
 			unit.Steps = append(unit.Steps, step)
 		default:
@@ -265,7 +306,7 @@ func changesetUnit(path string) (Unit, []string, error) {
 			warnings = append(warnings, fmt.Sprintf("%s: %s", source, last.Note))
 			continue // apply does not run the post hook of a skipped delta
 		}
-		if hooked {
+		if isHooked {
 			step, err := hookStep(KindPostHook, hooks.Hooks().Post, delta, source, position)
 			if err != nil {
 				return fail(err)
@@ -276,13 +317,18 @@ func changesetUnit(path string) (Unit, []string, error) {
 		}
 	}
 	unit.Steps = append(unit.Steps, fks...)
+	// a changeset stops at its first failure
+	for i := range unit.Steps {
+		unit.Steps[i].StopOnFailure = true
+	}
 	return unit, warnings, nil
 }
 
 // deltaStep is the step for a delta that generates a single statement. A delta whose definition is missing from the
 // state files generates none - apply skips it
 func deltaStep(delta manifest.Delta, ddl string, err error, source string, position int) (Step, error) {
-	step := Step{Kind: KindDelta, Describe: describe(delta), Source: source, Delta: position}
+	step := Step{Kind: KindDelta, Describe: describe(delta), Source: source, Delta: position,
+		Record: Record{Type: delta.StatementType(), Name: delta.Describe()}}
 	var missing *manifest.MissingDefinitionError
 	switch {
 	case errors.As(err, &missing):
@@ -323,6 +369,11 @@ func deltaTolerates(statementType string) []string {
 	return codes
 }
 
+// hooked is implemented by the deltas that support pre/post hooks - those that embed manifest.PrePostHook
+type hooked interface {
+	Hooks() manifest.PrePostHook
+}
+
 func hookStep(kind string, hook manifest.Hook, delta manifest.Delta, source string, position int) (*Step, error) {
 	statements, err := hook.Statements()
 	if err != nil {
@@ -331,26 +382,33 @@ func hookStep(kind string, hook manifest.Hook, delta manifest.Delta, source stri
 	if len(statements) == 0 {
 		return nil, nil
 	}
-	step := Step{Kind: kind, Describe: describe(delta), Source: source, Delta: position, Sql: statements}
+	step := Step{Kind: kind, Describe: describe(delta), Source: source, Delta: position, Sql: statements,
+		Record: Record{Type: kind, PerStatement: true}}
 	if len(hook.Sql) == 0 {
 		step.Script = relative(manifest.ScriptPath(viper.GetString("workdir"), hook.Script))
+		step.Record = Record{Type: "Delta script hook", FailType: fmt.Sprintf("Delta script hook [%s]", hook.Script), Name: hook.Script}
 	}
 	return &step, nil
 }
 
 // tableSteps creates the table with its indexes, triggers and constraints - its foreign keys are added separately
 func tableSteps(table manifest.Table, source string, position int) []Step {
-	steps := []Step{{Kind: KindTable, Describe: table.Name, Source: source, Delta: position, Sql: []string{table.GenerateDdl()}}}
+	steps := []Step{{Kind: KindTable, Describe: table.Name, Source: source, Delta: position, Sql: []string{table.GenerateDdl()},
+		Record: Record{Type: "Create Table", Name: table.Name}}}
 	for _, idx := range table.Indexes {
-		steps = append(steps, Step{Kind: KindIndex, Describe: table.Name + "." + idx.Name, Source: source, Delta: position, Sql: []string{idx.GenerateDdl(table.Name)}})
+		name := table.Name + "." + idx.Name
+		steps = append(steps, Step{Kind: KindIndex, Describe: name, Source: source, Delta: position, Sql: []string{idx.GenerateDdl(table.Name)},
+			Record: Record{Type: "Create Index", Name: name}})
 	}
 	for _, trg := range table.Triggers {
-		steps = append(steps, Step{Kind: KindTrigger, Describe: table.Name + "." + trg.Name, Source: source, Delta: position, Sql: []string{trg.Ddl},
-			Tolerate: []string{codeDuplicateObject}})
+		name := table.Name + "." + trg.Name
+		steps = append(steps, Step{Kind: KindTrigger, Describe: name, Source: source, Delta: position, Sql: []string{trg.Ddl},
+			Tolerate: []string{codeDuplicateObject}, Record: Record{Type: "Create Trigger", Name: name}})
 	}
 	for _, cons := range table.Constraints {
-		steps = append(steps, Step{Kind: KindConstraint, Describe: table.Name + "." + cons.Name, Source: source, Delta: position, Sql: []string{cons.GenerateDdl(table.Name)},
-			Tolerate: []string{codeDuplicateTable, codeDuplicateObject}})
+		name := table.Name + "." + cons.Name
+		steps = append(steps, Step{Kind: KindConstraint, Describe: name, Source: source, Delta: position, Sql: []string{cons.GenerateDdl(table.Name)},
+			Tolerate: []string{codeDuplicateTable, codeDuplicateObject}, Record: Record{Type: "Add Constraint", Name: name}})
 	}
 	return steps
 }
@@ -358,14 +416,15 @@ func tableSteps(table manifest.Table, source string, position int) []Step {
 func fkSteps(table manifest.Table, source string, position int) []Step {
 	var steps []Step
 	for _, fk := range table.ForeignKeys {
-		steps = append(steps, Step{Kind: KindFk, Describe: table.Name + "." + fk.Name, Source: source, Delta: position, Sql: []string{fk.AlterStmt(table.Name, "add")},
-			Tolerate: []string{codeDuplicateObject}})
+		name := table.Name + "." + fk.Name
+		steps = append(steps, Step{Kind: KindFk, Describe: name, Source: source, Delta: position, Sql: []string{fk.AlterStmt(table.Name, "add")},
+			Tolerate: []string{codeDuplicateObject}, Record: Record{Type: "Add FK", Name: name}})
 	}
 	return steps
 }
 
 // sqlFileSteps runs the state sql files of the phase (pre or post), in file name order
-func sqlFileSteps(phase string) ([]Step, error) {
+func sqlFileSteps(phase string, stopOnFailure bool) ([]Step, error) {
 	paths, err := manifest.ListFiles(filepath.Join(viper.GetString("workdir"), "state", "sql", phase), "sql")
 	if err != nil {
 		return nil, err
@@ -376,7 +435,8 @@ func sqlFileSteps(phase string) ([]Step, error) {
 		if err != nil {
 			return nil, fmt.Errorf("unable to read %s: %w", relative(path), err)
 		}
-		steps = append(steps, Step{Kind: KindSql, Describe: filepath.Base(path), Source: relative(path), Script: relative(path), Sql: []string{string(dat)}})
+		steps = append(steps, Step{Kind: KindSql, Describe: filepath.Base(path), Source: relative(path), Script: relative(path), Sql: []string{string(dat)},
+			StopOnFailure: stopOnFailure, Record: Record{Type: "sql", Name: filepath.Base(path)}})
 	}
 	return steps, nil
 }
