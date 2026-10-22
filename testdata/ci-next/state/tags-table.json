@@ -4,7 +4,8 @@
   "columns" : [
     { "name" : "id", "datatype" : "integer", "nullable" : false, "primarykey" : true, "generate" : "always" },
     { "name" : "document_id", "datatype" : "uuid", "nullable" : false },
-    { "name" : "label", "datatype" : "text", "nullable" : false }
+    { "name" : "label", "datatype" : "text", "nullable" : false },
+    { "name" : "color", "datatype" : "tag_color", "nullable" : true }
   ],
   "foreign-keys" : [
     {

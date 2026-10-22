@@ -18,6 +18,25 @@
           ]
         },
         {
+          "kind": "enum",
+          "describe": "tag_color",
+          "source": "state/tag_color-enum.json",
+          "sql": [
+            "create type tag_color as enum ('red', 'green', 'blue')"
+          ],
+          "tolerate": [
+            "42710"
+          ]
+        },
+        {
+          "kind": "comment",
+          "describe": "enum tag_color",
+          "source": "state/tag_color-enum.json",
+          "sql": [
+            "comment on type tag_color is 'Colors a tag can have'"
+          ]
+        },
+        {
           "kind": "table",
           "describe": "documents",
           "source": "state/documents-table.json",
@@ -113,7 +132,7 @@
           "describe": "tags",
           "source": "state/tags-table.json",
           "sql": [
-            "create table if not exists tags (id integer primary key generated always as identity,document_id uuid not null,label text not null) "
+            "create table if not exists tags (id integer primary key generated always as identity,document_id uuid not null,label text not null,color tag_color) "
           ]
         },
         {

@@ -240,3 +240,35 @@ func TestComments(t *testing.T) {
 		}
 	}
 }
+
+func TestEnums(t *testing.T) {
+	expected := documents()
+	expected.Enums["doc_status"] = Enum{Values: []string{"draft", "published"}, Comment: "Lifecycle"}
+	expected.Enums["priority"] = Enum{Values: []string{"low", "high"}}
+	expected.Enums["region"] = Enum{Values: []string{"east", "west"}}
+
+	actual := documents()
+	// a value added by hand, and an enum whose values are in another order - postgres sorts by that order
+	actual.Enums["doc_status"] = Enum{Values: []string{"draft", "published", "archived"}}
+	actual.Enums["priority"] = Enum{Values: []string{"high", "low"}}
+	actual.Enums["legacy_kind"] = Enum{Values: []string{"a"}}
+
+	findings := Compare(expected, actual)
+	want := []string{
+		"changed enum doc_status",
+		"changed enum doc_status comment",
+		"extra enum legacy_kind",
+		"changed enum priority",
+		"missing enum region",
+	}
+	if got := describe(findings); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("EXPECTED %v\nACTUAL: %v", want, got)
+	}
+	if f := findings[0]; f.Expected != "draft, published" || f.Actual != "draft, published, archived" {
+		t.Errorf("EXPECTED the values listed in order  ACTUAL: %q -> %q", f.Expected, f.Actual)
+	}
+	report := Report{Findings: findings}
+	if err := report.Ignore([]string{"legacy_*"}); err != nil || len(report.Findings) != 4 {
+		t.Errorf("EXPECTED an ignore pattern to match an enum's name  ACTUAL: %v, %d findings", err, len(report.Findings))
+	}
+}

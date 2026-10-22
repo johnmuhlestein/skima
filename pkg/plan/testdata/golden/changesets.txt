@@ -1,16 +1,20 @@
-Plan for schema app1: deployed 1.0.0 -> 1.0.3 (3 changesets, 20 statements)
+Plan for schema app1: deployed 1.0.0 -> 1.0.3 (3 changesets, 23 statements)
 
 == changeset 1.0.1  deltas/v1_0_1.json  [transaction]
 -- tag documents and track their priority
--- [1] table tags
-create table if not exists tags (id integer primary key generated always as identity,document_id uuid not null,label text not null);
--- [2] add column documents.priority  (tolerates 42P07, 42710)
+-- [1] add enum tag_color  (tolerates 42P07, 42710)
+create type tag_color as enum ('red', 'green', 'blue');
+-- [1] comment enum tag_color
+comment on type tag_color is 'Colors a tag can have';
+-- [2] table tags
+create table if not exists tags (id integer primary key generated always as identity,document_id uuid not null,label text not null,color tag_color);
+-- [3] add column documents.priority  (tolerates 42P07, 42710)
 alter table documents add column if not exists priority integer default 0;
--- [2] comment column documents.priority
+-- [3] comment column documents.priority
 comment on column documents.priority is 'Higher is processed sooner';
--- [2] post-hook add column documents.priority
+-- [3] post-hook add column documents.priority
 --   runs deltas/scripts/backfill_priority.sql (--show-scripts prints it)
--- [3] add index documents.documents_type_idx  (tolerates 42P07, 42710)
+-- [4] add index documents.documents_type_idx  (tolerates 42P07, 42710)
 create  index if not exists documents_type_idx on documents (document_type);
 -- [end] fk tags.tags_document_fk  (deferred to the end of the changeset; tolerates 42710)
 alter table tags add constraint tags_document_fk foreign key (document_id) references documents (id);
@@ -36,6 +40,8 @@ delete from tags where label = 'obsolete';
 comment on column documents.document_type is 'STRUCTURED or UNSTRUCTURED - it''s required';
 -- [8] drop comment on table tags  (tolerates 42P07, 42710, 42704, 42P01)
 comment on table tags is null;
+-- [9] alter enum tag_color (add value 'blue')  (tolerates 42P07, 42710)
+alter type tag_color add value if not exists 'blue' after 'green';
 
 == changeset 1.0.3  deltas/v1_0_3.json  [NO TRANSACTION - a failure part way through is not rolled back]
 -- index without locking and refresh the view
@@ -48,4 +54,5 @@ create or replace view project_documents (project_name,document_id,document_type
 -- [3] comment view project_documents
 comment on view project_documents is 'Documents per project';
 
+WARNING: deltas/v1_0_2.json#/deltas/8: changeset 1.0.2 adds the value 'blue' to enum tag_color in a transaction - postgres does not let the value be used until the changeset commits, so use it in a later changeset
 WARNING: changeset 1.0.3 runs without a transaction - a failure part way through leaves the earlier deltas in place

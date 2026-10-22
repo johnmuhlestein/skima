@@ -19,6 +19,7 @@
     },
     { "object": "script", "description": "tidy up orphaned tags", "script": "cleanup_tags.sql" },
     { "object": "comment", "action": "add", "on": "column", "name": "document_type", "reference": "documents" },
-    { "object": "comment", "action": "drop", "on": "table", "name": "tags" }
+    { "object": "comment", "action": "drop", "on": "table", "name": "tags" },
+    { "object": "enum", "action": "alter", "name": "tag_color", "value": "blue" }
   ]
 }

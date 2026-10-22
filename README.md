@@ -31,6 +31,7 @@ Projects that describe a database schema should follow this simple structure:
 |   |   |   |   |-- myfunction.sql
 |   |   |   |-- post
 |   |   |   |   |-- dataload.sql
+|   |   |-- doc_status-enum.json
 |   |   |-- documents-table.json
 |   |   |-- projects-table.json
 ```
@@ -215,7 +216,8 @@ A delta can make the following types of changes
 * primary key - add, drop
 * foreign key - add, drop
 * constraint - add, drop (valid for check and unique)
-* comment - add, drop (on a table, column or view - see [Comments](#comments))
+* enum - add, drop, alter to add a value (see [Enum State File](#enum-state-file))
+* comment - add, drop (on a table, column, view or enum - see [Comments](#comments))
 * column - add, drop, rename, alter
 
 #### Transactions
@@ -320,7 +322,8 @@ Drift in schema app1 (deployed 1.0.3): 3 differences
 ```
 
 * Tables, columns (type, nullability, default, identity, generated, comment), primary key, unique, check and foreign
-  key constraints, indexes, triggers, views and table and view comments are compared. Functions, grants and data are not
+  key constraints, indexes, triggers, views, enums (their values, in order) and table, view and enum comments are
+  compared. Functions, grants and data are not
 * Postgres rewrites definitions when it stores them (`varchar` becomes `character varying`, check constraints and views
   are reformatted), so drift does not compare the state files' text. It builds the state files into temporary tables
   in a transaction that is always rolled back and compares how postgres describes those with the real schema. It
@@ -456,6 +459,32 @@ to set up an environment variable `export SKM_DBCONN_PASSWORD=mypassword`
 ## JSON reference
 Some snippets that can help with the different state and delta files
 
+### Enum State File
+An enum type is defined in `state/<name>-enum.json` with its values in sort order. A state build creates enums after
+the pre sql files and before the tables, so columns can use them as their `datatype`:
+```json
+{
+  "name": "doc_status",
+  "values": ["draft", "published", "archived"],
+  "comment": "The lifecycle of a document"
+}
+```
+An `enum` delta `add`s the type from its state file or `drop`s it. Postgres can add a value to an enum but not remove
+or reorder one - to add a value, put it in the state file where it belongs in the sort order, and `alter` the enum with
+that `value`. skima adds it in that position (`after` the value before it):
+```json
+{
+  "version": "1.0.6",
+  "description": "documents can be archived",
+  "deltas": [
+    { "object": "enum", "action": "alter", "name": "doc_status", "value": "archived" }
+  ]
+}
+```
+Postgres does not let a value added in a transaction be used until the transaction commits, so a changeset that adds a
+value cannot also set rows to it - do that in a later changeset (`skima plan` warns about this). Removing a value
+means creating a new type and moving the columns to it, in a script delta.
+
 ### View State File
 A view has 3 attributes, and an optional `comment` (see [Comments](#comments))
 * name - the name of the view
@@ -537,7 +566,7 @@ This example would be the same for both `foreign-keys` (below) array within a Ta
 ```
 
 ### Comments
-Tables, columns and views take an optional `comment`, which skima sets with `comment on`. The text is quoted for you -
+Tables, columns, views and enums take an optional `comment`, which skima sets with `comment on`. The text is quoted for you -
 write it as plain text, apostrophes included:
 ```json
 {
@@ -551,8 +580,8 @@ write it as plain text, apostrophes included:
 ```
 A state build sets every comment, and a delta that adds a table, view or column sets the comments its state file
 gives it. To change a comment on an existing object, edit the state file and add a `comment` delta - `add` sets the
-comment from the state file, `drop` removes it. `on` is `table`, `column` or `view`, and a column comment names its
-table in `reference`:
+comment from the state file, `drop` removes it. `on` is `table`, `column`, `view` or `enum`, and a column comment names
+its table in `reference`:
 ```json
 {
   "version": "1.0.5",

@@ -182,6 +182,8 @@ func TestReadmeExamplesValid(t *testing.T) {
 			kind = KindChangeset
 		case doc["sql"] != nil:
 			kind = KindView
+		case doc["values"] != nil:
+			kind = KindEnum
 		default:
 			kind = KindTable
 			if doc["name"] == nil {

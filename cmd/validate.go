@@ -34,7 +34,8 @@ Old changesets can legitimately reference definitions later removed from the sta
 changesets are warnings. Use --since with the deployed version to make them errors in the changesets still to apply.
 
 With no arguments, every state and changeset file in the working directory is validated. JSON files in the state
-directory that are not named <name>-table.json or <name>-view.json are reported too, since skima ignores them.
+directory that are not named <name>-table.json, <name>-view.json or <name>-enum.json are reported too, since skima
+ignores them.
 
 Files given as arguments are validated individually. Their kind comes from the file name (-table.json, -view.json,
 or any .json file in a deltas directory) - use --type for files named otherwise.

@@ -238,9 +238,9 @@ func TestPlanHistoryRows(t *testing.T) {
 		}
 	}
 	expected := []string{
-		"Create Table", "delta add column", "Comment", "Delta script hook", "delta add index", "Add FK", // 1.0.1
+		"delta add enum", "Comment", "Create Table", "delta add column", "Comment", "Delta script hook", "delta add index", "Add FK", // 1.0.1
 		"pre-hook sql [0]", "delta alter column", "delta add constraint", "delta rename column", "delta drop fk",
-		"delta sql [0]", "delta sql [1]", "delta script sql [0]", "delta add comment", "delta drop comment", // 1.0.2
+		"delta sql [0]", "delta sql [1]", "delta script sql [0]", "delta add comment", "delta drop comment", "delta alter enum", // 1.0.2
 		"delta sql [0]", "delta add function", "delta add view", "Comment", // 1.0.3
 	}
 	if strings.Join(types, "|") != strings.Join(expected, "|") {

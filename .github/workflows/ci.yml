@@ -167,13 +167,14 @@ jobs:
             -c "alter table ci_schema.documents add column legacy_ref text" \
             -c "drop index ci_schema.documents_created_idx" \
             -c "alter table ci_schema.projects alter column description set default 'none'" \
-            -c "comment on column ci_schema.projects.name is 'edited by hand'"
+            -c "comment on column ci_schema.projects.name is 'edited by hand'" \
+            -c "alter type ci_schema.tag_color add value 'purple'"
           ./skima drift
           status=0
           ./skima drift --detailed-exitcode > /dev/null || status=$?
           [ "$status" -eq 2 ]
           found=$(./skima drift --output=json | jq -r '[.findings[] | "\(.change) \(.object) \(.name) \(.attribute // "")" | rtrimstr(" ")] | join(";")')
           echo "found: $found"
-          [ "$found" = "extra column documents.legacy_ref;missing index documents.documents_created_idx;changed column projects.description default;changed column projects.name comment" ]
+          [ "$found" = "extra column documents.legacy_ref;missing index documents.documents_created_idx;changed column projects.description default;changed column projects.name comment;changed enum tag_color" ]
           # ignored differences are not drift
-          ./skima drift --ignore documents.legacy_ref --ignore 'documents.*_idx' --ignore projects --detailed-exitcode
+          ./skima drift --ignore documents.legacy_ref --ignore 'documents.*_idx' --ignore projects --ignore tag_color --detailed-exitcode

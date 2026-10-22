@@ -1,4 +1,4 @@
-Plan for schema app1: not managed by skima yet - build version 1.0.3 from the state files (17 statements)
+Plan for schema app1: not managed by skima yet - build version 1.0.3 from the state files (19 statements)
 
 == state build 1.0.3  [transaction]
 -- sql update_last_modified_at.sql
@@ -9,6 +9,10 @@ begin
   return new;
 end;
 $$;
+-- enum tag_color  (tolerates 42710)
+create type tag_color as enum ('red', 'green', 'blue');
+-- comment enum tag_color
+comment on type tag_color is 'Colors a tag can have';
 -- table documents
 create table if not exists documents (id uuid not null,project_id uuid not null,file_location text,document_type varchar not null,priority integer default 0 , constraint documents_pk primary key (id));
 -- index documents.documents_type_idx
@@ -30,7 +34,7 @@ create trigger projects_last_modified_trg before update on projects for each row
 -- comment table projects
 comment on table projects is 'Projects that own documents';
 -- table tags
-create table if not exists tags (id integer primary key generated always as identity,document_id uuid not null,label text not null);
+create table if not exists tags (id integer primary key generated always as identity,document_id uuid not null,label text not null,color tag_color);
 -- fk documents.documents_project_fk  (tolerates 42710)
 alter table documents add constraint documents_project_fk foreign key (project_id) references projects (id) on delete cascade;
 -- fk tags.tags_document_fk  (tolerates 42710)
