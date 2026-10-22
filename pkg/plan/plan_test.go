@@ -6,6 +6,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"skima/pkg/manifest"
 	"skima/pkg/util"
 	"strings"
 	"testing"
@@ -224,5 +225,26 @@ func TestNoChangesetsStateVersion(t *testing.T) {
 	}
 	if p.To != "1.0.0" || p.From != "" {
 		t.Errorf("EXPECTED a state build of 1.0.0 when there are no changesets  ACTUAL: from %q to %q", p.From, p.To)
+	}
+}
+
+func TestHookedDeltas(t *testing.T) {
+	hook := manifest.PrePostHook{Pre: manifest.Hook{Sql: []string{"select 1"}}, Post: manifest.Hook{Script: "post.sql"}}
+	for name, delta := range map[string]manifest.Delta{
+		"SimpleDelta": manifest.SimpleDelta{PrePostHook: hook},
+		"ColumnDelta": manifest.ColumnDelta{PrePostHook: hook},
+		"FkDelta":     manifest.FkDelta{PrePostHook: hook},
+	} {
+		d, ok := delta.(hooked)
+		if !ok {
+			t.Errorf("%s should support pre/post hooks", name)
+			continue
+		}
+		if got := d.Hooks(); len(got.Pre.Sql) != 1 || got.Post.Script != "post.sql" {
+			t.Errorf("%s returned the wrong hooks: %+v", name, got)
+		}
+	}
+	if _, ok := manifest.Delta(manifest.SqlDelta{}).(hooked); ok {
+		t.Error("SqlDelta should not support pre/post hooks")
 	}
 }

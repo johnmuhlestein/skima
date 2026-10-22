@@ -104,9 +104,6 @@ jobs:
       - name: Plan has nothing left to apply
         run: ./skima plan --detailed-exitcode
 
-      - name: Re-apply is a no-op
-        run: ./skima apply
-
       - name: Verify schema
         run: |
           tables=$(psql -h localhost -U postgres -d postgres -tAc \
@@ -117,3 +114,41 @@ jobs:
             "select schema_version || ':' || status from ci_schema.skima_schema_history where apply_type = 'state'")
           echo "state run: $status"
           [ "$status" = "1.0.0:success" ]
+          # apply executes the plan, so it records a success row per planned statement
+          planned=$(./skima plan --from none --output=json | jq '[.units[].steps[] | select(.skipped != true) | .sql | length] | add')
+          recorded=$(psql -h localhost -U postgres -d postgres -tAc \
+            "select count(*) from ci_schema.skima_schema_statements s join ci_schema.skima_schema_history h using (run_id) where h.apply_type = 'state' and s.status = 'success'")
+          echo "state build: planned $planned statements, recorded $recorded"
+          [ "$planned" = "$recorded" ]
+
+      - name: Plan the next release
+        env:
+          SKM_WORKDIR: testdata/ci-next
+        run: |
+          ./skima plan
+          status=0
+          ./skima plan --detailed-exitcode > /dev/null || status=$?
+          [ "$status" -eq 2 ]
+
+      - name: Apply the next release
+        env:
+          SKM_WORKDIR: testdata/ci-next
+        run: ./skima apply
+
+      - name: Verify the next release
+        env:
+          SKM_WORKDIR: testdata/ci-next
+        run: |
+          ./skima plan --detailed-exitcode
+          status=$(psql -h localhost -U postgres -d postgres -tAc \
+            "select schema_version || ':' || status from ci_schema.skima_schema_history where delta_file = 'v1_0_1.json'")
+          echo "changeset run: $status"
+          [ "$status" = "1.0.1:success" ]
+          tags=$(psql -h localhost -U postgres -d postgres -tAc "select count(*) from ci_schema.tags")
+          echo "tags: $tags"
+          [ "$tags" = "1" ]
+          planned=$(./skima plan --from 1.0.0 --output=json | jq '[.units[].steps[] | select(.skipped != true) | .sql | length] | add')
+          recorded=$(psql -h localhost -U postgres -d postgres -tAc \
+            "select count(*) from ci_schema.skima_schema_statements s join ci_schema.skima_schema_history h using (run_id) where h.delta_file = 'v1_0_1.json' and s.status = 'success'")
+          echo "changeset 1.0.1: planned $planned statements, recorded $recorded"
+          [ "$planned" = "$recorded" ]

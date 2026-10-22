@@ -272,7 +272,7 @@ list of top level commands and at each sub command you can use `-h, --help` i.e.
 
 ### Planning an apply
 `skima plan` (or `skima apply --dry-run`) shows every statement `skima apply` would run, in the order it runs them,
-without changing anything:
+without changing anything. Apply builds the same plan and executes its steps, so the plan is exactly what apply runs:
 
 ```
 skima plan --from 1.0.1
@@ -361,7 +361,8 @@ basic commands and examples of a typical workflow
 ### History tables
 skima records every apply run in two tables in the managed schema
 * `skima_schema_history` - one row per run, with the schema version, apply type (state, changeset, baseline, sql), status and timestamps
-* `skima_schema_statements` - one row per statement executed during a run, with its status and a description
+* `skima_schema_statements` - one row per statement executed during a run, with its status and a description. A run
+  records a `success` row for each statement in its plan (see [Planning an apply](#planning-an-apply))
 
 The most recent run with a `success` (or `complete` for a baseline) status determines the currently deployed version. A changeset
 that failed and was rolled back is recorded as `rolled back`, and the statements it had already run are marked `rolled back` too.

@@ -36,9 +36,12 @@ func Render(w io.Writer, p Plan, opts RenderOptions) {
 		if !unit.Transactional {
 			transaction = "[NO TRANSACTION - a failure part way through is not rolled back]"
 		}
-		if unit.Kind == "state" {
+		switch unit.Kind {
+		case UnitState:
 			fmt.Fprintf(w, "== state build %s  %s\n", unit.Version, transaction)
-		} else {
+		case UnitStateSql:
+			fmt.Fprintf(w, "== state pre sql files %s  %s\n", unit.Version, transaction)
+		default:
 			fmt.Fprintf(w, "== changeset %s  %s  %s\n", unit.Version, unit.File, transaction)
 			if unit.Description != "" {
 				fmt.Fprintf(w, "-- %s\n", unit.Description)

@@ -1,0 +1,9 @@
+{
+  "name" : "projects",
+  "columns" : [
+    { "name" : "id", "datatype" : "uuid", "nullable" : false },
+    { "name" : "name", "datatype" : "text", "nullable" : false },
+    { "name" : "description", "datatype" : "text", "nullable" : true }
+  ],
+  "primary-key" : ["id"]
+}
