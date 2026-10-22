@@ -184,6 +184,8 @@ func TestReadmeExamplesValid(t *testing.T) {
 			kind = KindView
 		case doc["values"] != nil:
 			kind = KindEnum
+		case doc["ownedby"] != nil || doc["increment"] != nil:
+			kind = KindSequence
 		default:
 			kind = KindTable
 			if doc["name"] == nil {

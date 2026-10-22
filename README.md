@@ -34,6 +34,7 @@ Projects that describe a database schema should follow this simple structure:
 |   |   |-- doc_status-enum.json
 |   |   |-- documents-table.json
 |   |   |-- projects-table.json
+|   |   |-- invoice_no-sequence.json
 ```
 Database objects are described using JSON for example a file named `documents-table.json` could look like the following:
 ```json
@@ -217,7 +218,8 @@ A delta can make the following types of changes
 * foreign key - add, drop
 * constraint - add, drop (valid for check and unique)
 * enum - add, drop, alter to add a value (see [Enum State File](#enum-state-file))
-* comment - add, drop (on a table, column, view or enum - see [Comments](#comments))
+* sequence - add, drop, alter (see [Sequence State File](#sequence-state-file))
+* comment - add, drop (on a table, column, view, enum or sequence - see [Comments](#comments))
 * column - add, drop, rename, alter
 
 #### Transactions
@@ -322,8 +324,10 @@ Drift in schema app1 (deployed 1.0.3): 3 differences
 ```
 
 * Tables, columns (type, nullability, default, identity, generated, comment), primary key, unique, check and foreign
-  key constraints, indexes, triggers, views, enums (their values, in order) and table, view and enum comments are
-  compared. Functions, grants and data are not
+  key constraints, indexes, triggers, views, enums (their values, in order), sequences (settings and owner) and table,
+  view, enum and sequence comments are compared. Sequences of identity columns are compared as the column, and a
+  sequence a column owns (e.g. a `serial` column's) is not reported as extra on its own. Functions, grants and data are
+  not
 * Postgres rewrites definitions when it stores them (`varchar` becomes `character varying`, check constraints and views
   are reformatted), so drift does not compare the state files' text. It builds the state files into temporary tables
   in a transaction that is always rolled back and compares how postgres describes those with the real schema. It
@@ -485,6 +489,49 @@ Postgres does not let a value added in a transaction be used until the transacti
 value cannot also set rows to it - do that in a later changeset (`skima plan` warns about this). Removing a value
 means creating a new type and moving the columns to it, in a script delta.
 
+### Sequence State File
+A sequence is defined in `state/<name>-sequence.json`. Every setting is optional - one that is left out takes postgres'
+default (`datatype` is `bigint`). A state build creates sequences after the enums and before the tables, so a column
+default can use them, and makes `ownedby` (`table.column`) the owner once the tables exist - an owned sequence is
+dropped with its column:
+```json
+{
+  "name": "invoice_no",
+  "datatype": "bigint",
+  "start": 1000,
+  "increment": 5,
+  "minvalue": 1000,
+  "maxvalue": 9999999,
+  "cache": 10,
+  "cycle": false,
+  "ownedby": "invoices.number",
+  "comment": "Invoice numbers"
+}
+```
+The owning column takes its numbers from the sequence with a default:
+```json
+{
+  "name": "invoices",
+  "columns": [
+    { "name": "number", "datatype": "bigint", "nullable": false, "default": "nextval('invoice_no')", "dfltfunc": true }
+  ]
+}
+```
+A `sequence` delta `add`s the sequence from its state file or `drop`s it. In a changeset that adds the sequence, its
+owner is set after every other delta, like the foreign keys of added tables, so the owning table can be added in the
+same changeset. `alter` brings every setting and the owner of an existing sequence in line with its state file - a
+setting the state file leaves out goes back to the default - but never restarts it, so `start` only applies when the
+sequence is created:
+```json
+{
+  "version": "1.0.7",
+  "description": "number invoices in steps of 10",
+  "deltas": [
+    { "object": "sequence", "action": "alter", "name": "invoice_no" }
+  ]
+}
+```
+
 ### View State File
 A view has 3 attributes, and an optional `comment` (see [Comments](#comments))
 * name - the name of the view
@@ -566,7 +613,7 @@ This example would be the same for both `foreign-keys` (below) array within a Ta
 ```
 
 ### Comments
-Tables, columns, views and enums take an optional `comment`, which skima sets with `comment on`. The text is quoted for you -
+Tables, columns, views, enums and sequences take an optional `comment`, which skima sets with `comment on`. The text is quoted for you -
 write it as plain text, apostrophes included:
 ```json
 {
@@ -580,8 +627,8 @@ write it as plain text, apostrophes included:
 ```
 A state build sets every comment, and a delta that adds a table, view or column sets the comments its state file
 gives it. To change a comment on an existing object, edit the state file and add a `comment` delta - `add` sets the
-comment from the state file, `drop` removes it. `on` is `table`, `column`, `view` or `enum`, and a column comment names
-its table in `reference`:
+comment from the state file, `drop` removes it. `on` is `table`, `column`, `view`, `enum` or `sequence`, and a column
+comment names its table in `reference`:
 ```json
 {
   "version": "1.0.5",

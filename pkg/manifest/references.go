@@ -19,6 +19,7 @@ type stateIndex struct {
 	tableFiles map[string]string
 	views      map[string]View
 	enums      map[string]Enum
+	sequences  map[string]Sequence
 }
 
 func stateName(path string, suffix string) string {
@@ -27,7 +28,7 @@ func stateName(path string, suffix string) string {
 
 // indexState parses the state files that passed schema validation
 func indexState(stateResults []*FileValidation) stateIndex {
-	index := stateIndex{tables: map[string]Table{}, tableFiles: map[string]string{}, views: map[string]View{}, enums: map[string]Enum{}}
+	index := stateIndex{tables: map[string]Table{}, tableFiles: map[string]string{}, views: map[string]View{}, enums: map[string]Enum{}, sequences: map[string]Sequence{}}
 	for _, result := range stateResults {
 		if !result.Valid {
 			continue
@@ -46,6 +47,10 @@ func indexState(stateResults []*FileValidation) stateIndex {
 		case KindEnum:
 			if enum, err := ParseEnumByPath(result.File); err == nil {
 				index.enums[stateName(result.File, "-enum.json")] = enum
+			}
+		case KindSequence:
+			if seq, err := ParseSequenceByPath(result.File); err == nil {
+				index.sequences[stateName(result.File, "-sequence.json")] = seq
 			}
 		}
 	}
@@ -75,6 +80,24 @@ func checkStateReferences(result *FileValidation, index stateIndex) {
 		return
 	}
 	switch result.Kind {
+	case KindSequence:
+		fileName := stateName(result.File, "-sequence.json")
+		seq, ok := index.sequences[fileName]
+		if !ok {
+			return
+		}
+		if seq.Name != fileName {
+			result.addIssue(SeverityError, "/name", "name '%s' does not match the file name - deltas load this file as sequence '%s'", seq.Name, fileName)
+		}
+		if table, column, found := strings.Cut(seq.Ownedby, "."); found {
+			owner, ok := index.tables[table]
+			switch {
+			case !ok:
+				result.addIssue(SeverityError, "/ownedby", "owned by table '%s', which has no valid state file (state/%s-table.json)", table, table)
+			case !hasColumn(owner, column):
+				result.addIssue(SeverityError, "/ownedby", "owned by column '%s', which table '%s' does not have in %s", column, table, displayFile(index, table))
+			}
+		}
 	case KindEnum:
 		if enum, ok := index.enums[stateName(result.File, "-enum.json")]; ok && enum.Name != stateName(result.File, "-enum.json") {
 			result.addIssue(SeverityError, "/name", "name '%s' does not match the file name - deltas load this file as enum '%s'", enum.Name, stateName(result.File, "-enum.json"))
@@ -175,15 +198,15 @@ func checkChangesetReferences(result *FileValidation, index stateIndex, workdir 
 				}
 			}
 		case SimpleDelta:
-			if d.Action != "add" && !(d.Object == "enum" && d.Action == "alter") {
-				continue // drop and rename do not read state - an enum alter reads the value's position
+			if d.Action != "add" && !(d.Action == "alter" && (d.Object == "enum" || d.Object == "sequence")) {
+				continue // drop and rename do not read state - an enum or sequence alter does
 			}
 			checkSimpleAdd(result, index, workdir, d, location, severity)
 		}
 	}
 }
 
-// checkSimpleAdd checks a delta that reads its definition from the state files - an add, or an enum alter
+// checkSimpleAdd checks a delta that reads its definition from the state files - an add, or an enum or sequence alter
 func checkSimpleAdd(result *FileValidation, index stateIndex, workdir string, d SimpleDelta, location string, severity string) {
 	switch d.Object {
 	case "table":
@@ -203,6 +226,10 @@ func checkSimpleAdd(result *FileValidation, index stateIndex, workdir string, d 
 		result.addIssue(severity, location+"/name", "function '%s' has no sql file - expected %s", d.Name, strings.Join(FunctionFilePaths("", d.Name), " or "))
 	case "comment":
 		checkCommentAdd(result, index, d, location, severity)
+	case "sequence":
+		if _, ok := index.sequences[d.Name]; !ok {
+			result.addIssue(severity, location+"/name", "sequence '%s' has no valid state file (state/%s-sequence.json)", d.Name, d.Name)
+		}
 	case "enum":
 		enum, ok := index.enums[d.Name]
 		if !ok {
@@ -277,6 +304,13 @@ func checkCommentAdd(result *FileValidation, index stateIndex, d SimpleDelta, lo
 			return
 		}
 		comment, file = enum.Comment, filepath.Join("state", d.Name+"-enum.json")
+	case "sequence":
+		seq, ok := index.sequences[d.Name]
+		if !ok {
+			result.addIssue(severity, location+"/name", "sequence '%s' has no valid state file (state/%s-sequence.json)", d.Name, d.Name)
+			return
+		}
+		comment, file = seq.Comment, filepath.Join("state", d.Name+"-sequence.json")
 	}
 	if comment == "" {
 		result.addIssue(severity, location+"/name", "%s '%s' has no comment in %s - add one, or drop the comment instead", d.On, d.commentTarget(), file)

@@ -133,6 +133,21 @@ type Enum struct {
 	Comment string
 }
 
+// Sequence is a sequence - the settings that are nil take postgres' defaults
+type Sequence struct {
+	Name      string
+	Datatype  string
+	Start     *int64
+	Increment *int64
+	Minvalue  *int64
+	Maxvalue  *int64
+	Cache     *int64
+	Cycle     bool
+	// Ownedby is the table.column that owns the sequence - it is dropped with the column
+	Ownedby string
+	Comment string
+}
+
 type Hook struct {
 	Sql    []string
 	Script string
@@ -157,7 +172,7 @@ type SimpleDelta struct {
 	Name      string
 	Reference string
 	NewName   string
-	// On is what a comment delta comments on: table, column, view or enum
+	// On is what a comment delta comments on: table, column, view, enum or sequence
 	On string
 	// Value is the value an enum alter delta adds
 	Value string
@@ -358,6 +373,88 @@ func (e Enum) AddValueDdl(value string) (string, bool) {
 		ddl += " before " + QuoteLiteral(e.Values[1])
 	}
 	return ddl, true
+}
+
+func ParseSequenceByName(name string) (Sequence, error) {
+	path := filepath.Join(viper.GetString("workdir"), "state", fmt.Sprintf("%s-sequence.json", name))
+	return ParseSequenceByPath(path)
+}
+
+func ParseSequenceByPath(path string) (Sequence, error) {
+	entityBytes, err := reader.readFile(path)
+	if err != nil {
+		return Sequence{}, err
+	}
+	seq := Sequence{}
+	err = json.Unmarshal(entityBytes, &seq)
+	return seq, err
+}
+
+// GenerateDdl creates the sequence with the settings it defines - its owner is set separately, once the owning table
+// exists (OwnedByDdl)
+func (s Sequence) GenerateDdl() string {
+	var bld strings.Builder
+	fmt.Fprintf(&bld, "create sequence %s", s.Name)
+	if s.Datatype != "" {
+		fmt.Fprintf(&bld, " as %s", s.Datatype)
+	}
+	for _, setting := range []struct {
+		keyword string
+		value   *int64
+	}{{"increment by", s.Increment}, {"minvalue", s.Minvalue}, {"maxvalue", s.Maxvalue}, {"start with", s.Start}, {"cache", s.Cache}} {
+		if setting.value != nil {
+			fmt.Fprintf(&bld, " %s %d", setting.keyword, *setting.value)
+		}
+	}
+	if s.Cycle {
+		bld.WriteString(" cycle")
+	}
+	return bld.String()
+}
+
+// OwnedByDdl makes the sequence's ownedby column its owner
+func (s Sequence) OwnedByDdl() string {
+	return fmt.Sprintf("alter sequence %s owned by %s", s.Name, s.Ownedby)
+}
+
+// AlterDdl brings every setting and the owner of an existing sequence in line with the definition - a setting that is
+// not defined goes back to postgres' default. The sequence is not restarted, so start is left as it is
+func (s Sequence) AlterDdl() string {
+	var bld strings.Builder
+	datatype := s.Datatype
+	if datatype == "" {
+		datatype = "bigint"
+	}
+	fmt.Fprintf(&bld, "alter sequence %s as %s", s.Name, datatype)
+	orDefault := func(value *int64, fallback int64) int64 {
+		if value != nil {
+			return *value
+		}
+		return fallback
+	}
+	fmt.Fprintf(&bld, " increment by %d", orDefault(s.Increment, 1))
+	for _, limit := range []struct {
+		keyword string
+		value   *int64
+	}{{"minvalue", s.Minvalue}, {"maxvalue", s.Maxvalue}} {
+		if limit.value != nil {
+			fmt.Fprintf(&bld, " %s %d", limit.keyword, *limit.value)
+		} else {
+			fmt.Fprintf(&bld, " no %s", limit.keyword)
+		}
+	}
+	fmt.Fprintf(&bld, " cache %d", orDefault(s.Cache, 1))
+	if s.Cycle {
+		bld.WriteString(" cycle")
+	} else {
+		bld.WriteString(" no cycle")
+	}
+	if s.Ownedby != "" {
+		fmt.Fprintf(&bld, " owned by %s", s.Ownedby)
+	} else {
+		bld.WriteString(" owned by none")
+	}
+	return bld.String()
 }
 
 func ParseViewByName(name string) (View, error) {
@@ -732,6 +829,20 @@ func (sd SimpleDelta) Ddl() (string, error) {
 			}
 			return "", missingDefinition("Enum %s did not have a value matching %s", sd.Name, sd.Value)
 		}
+	case "sequence":
+		switch sd.Action {
+		case "drop":
+			return fmt.Sprintf("drop sequence if exists %s", sd.Name), nil
+		case "add", "alter":
+			seq, err := ParseSequenceByName(sd.Name)
+			if err != nil {
+				return "", fmt.Errorf("Unable to parse the sequence %s: %w", sd.Name, err)
+			}
+			if sd.Action == "add" {
+				return seq.GenerateDdl(), nil
+			}
+			return seq.AlterDdl(), nil
+		}
 	case "comment":
 		if sd.Action == "drop" {
 			return CommentDdl(sd.On, sd.commentTarget(), ""), nil
@@ -803,8 +914,14 @@ func (sd SimpleDelta) stateComment() (string, error) {
 			return "", fmt.Errorf("Unable to parse the enum %s: %w", sd.Name, err)
 		}
 		comment = e.Comment
+	case "sequence":
+		seq, err := ParseSequenceByName(sd.Name)
+		if err != nil {
+			return "", fmt.Errorf("Unable to parse the sequence %s: %w", sd.Name, err)
+		}
+		comment = seq.Comment
 	default:
-		return "", missingDefinition("cannot comment on %q - use table, column, view or enum", sd.On)
+		return "", missingDefinition("cannot comment on %q - use table, column, view, enum or sequence", sd.On)
 	}
 	if comment == "" {
 		return "", missingDefinition("%s %s has no comment in its state file", sd.On, sd.commentTarget())
@@ -822,7 +939,8 @@ func (t Table) Column(name string) (Column, bool) {
 	return Column{}, false
 }
 
-// CommentDdl sets the comment on a table, column (target is table.column), view or enum - an empty comment removes it.
+// CommentDdl sets the comment on a table, column (target is table.column), view, enum or sequence - an empty comment
+// removes it.
 // The comment is quoted as a string literal
 func CommentDdl(on string, target string, comment string) string {
 	literal := "null"

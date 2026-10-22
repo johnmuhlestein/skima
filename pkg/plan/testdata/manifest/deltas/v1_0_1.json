@@ -2,6 +2,7 @@
   "description": "tag documents and track their priority",
   "deltas": [
     { "object": "enum", "action": "add", "name": "tag_color" },
+    { "object": "sequence", "action": "add", "name": "tag_seq" },
     { "object": "table", "action": "add", "name": "tags" },
     {
       "object": "column", "action": "add", "name": "priority", "reference": "documents",

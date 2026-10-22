@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/johnmuhlestein/skima/main/pkg/manifest/schemas/sequence.schema.json",
+  "title": "skima sequence definition",
+  "description": "A sequence state file (state/<name>-sequence.json) - settings left out take postgres' defaults",
+  "type": "object",
+  "required": ["name"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "name": { "$ref": "table.schema.json#/$defs/name" },
+    "datatype": { "enum": ["smallint", "integer", "bigint"], "description": "bigint by default" },
+    "start": { "type": "integer", "description": "Only used when the sequence is created - an alter never restarts it" },
+    "increment": { "type": "integer", "not": { "const": 0 } },
+    "minvalue": { "type": "integer" },
+    "maxvalue": { "type": "integer" },
+    "cache": { "type": "integer", "minimum": 1 },
+    "cycle": { "type": "boolean" },
+    "ownedby": {
+      "type": "string",
+      "pattern": "^[^.]+\\.[^.]+$",
+      "description": "table.column - the sequence is dropped with the column"
+    },
+    "comment": { "$ref": "table.schema.json#/$defs/comment" }
+  }
+}

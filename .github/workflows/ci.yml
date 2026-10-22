@@ -168,13 +168,17 @@ jobs:
             -c "drop index ci_schema.documents_created_idx" \
             -c "alter table ci_schema.projects alter column description set default 'none'" \
             -c "comment on column ci_schema.projects.name is 'edited by hand'" \
-            -c "alter type ci_schema.tag_color add value 'purple'"
+            -c "alter type ci_schema.tag_color add value 'purple'" \
+            -c "alter sequence ci_schema.tag_seq increment by 7" \
+            -c "create sequence ci_schema.stray_seq" \
+            -c "alter table ci_schema.projects add column legacy_no serial"
           ./skima drift
           status=0
           ./skima drift --detailed-exitcode > /dev/null || status=$?
           [ "$status" -eq 2 ]
           found=$(./skima drift --output=json | jq -r '[.findings[] | "\(.change) \(.object) \(.name) \(.attribute // "")" | rtrimstr(" ")] | join(";")')
           echo "found: $found"
-          [ "$found" = "extra column documents.legacy_ref;missing index documents.documents_created_idx;changed column projects.description default;changed column projects.name comment;changed enum tag_color" ]
+          # the serial column's sequence belongs to the column, so it is not reported on its own
+          [ "$found" = "extra column documents.legacy_ref;missing index documents.documents_created_idx;changed column projects.description default;extra column projects.legacy_no;changed column projects.name comment;extra sequence stray_seq;changed enum tag_color;changed sequence tag_seq increment" ]
           # ignored differences are not drift
-          ./skima drift --ignore documents.legacy_ref --ignore 'documents.*_idx' --ignore projects --ignore tag_color --detailed-exitcode
+          ./skima drift --ignore documents.legacy_ref --ignore 'documents.*_idx' --ignore projects --ignore tag_color --ignore '*_seq' --detailed-exitcode

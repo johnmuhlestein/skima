@@ -272,3 +272,41 @@ func TestEnums(t *testing.T) {
 		t.Errorf("EXPECTED an ignore pattern to match an enum's name  ACTUAL: %v, %d findings", err, len(report.Findings))
 	}
 }
+
+func TestSequences(t *testing.T) {
+	seq := Sequence{Type: "bigint", Start: 1000, Increment: 5, Min: 1, Max: 9223372036854775807, Cache: 10, OwnedBy: "tags.seq_no", Comment: "Numbers tags"}
+	expected := documents()
+	expected.Sequences["tag_seq"] = seq
+	expected.Sequences["report_no"] = Sequence{Type: "bigint", Start: 1, Increment: 1, Min: 1, Max: 100, Cache: 1}
+
+	actual := documents()
+	changed := seq
+	changed.Increment, changed.Cycle, changed.OwnedBy, changed.Comment = 7, true, "", ""
+	actual.Sequences["tag_seq"] = changed
+	// an unowned sequence nobody defined is extra - one a column owns (e.g. a serial column's) belongs to the column
+	actual.Sequences["stray_seq"] = Sequence{Type: "bigint", Start: 1, Increment: 1, Min: 1, Max: 9223372036854775807, Cache: 1}
+	actual.Sequences["projects_legacy_no_seq"] = Sequence{Type: "integer", Start: 1, Increment: 1, Min: 1, Max: 2147483647, Cache: 1, OwnedBy: "projects.legacy_no"}
+
+	findings := Compare(expected, actual)
+	want := []string{
+		"missing sequence report_no",
+		"extra sequence stray_seq",
+		"changed sequence tag_seq comment",
+		"changed sequence tag_seq cycle",
+		"changed sequence tag_seq increment",
+		"changed sequence tag_seq owned by",
+	}
+	if got := describe(findings); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("EXPECTED %v\nACTUAL: %v", want, got)
+	}
+	byName := map[string]Finding{}
+	for _, f := range findings {
+		byName[f.Name+" "+f.Attribute] = f
+	}
+	if f := byName["tag_seq owned by"]; f.Expected != "tags.seq_no" || f.Actual != "none" {
+		t.Errorf("EXPECTED owned by tags.seq_no -> none  ACTUAL: %q -> %q", f.Expected, f.Actual)
+	}
+	if f := byName["report_no "]; f.Expected != "bigint start 1 increment 1 minvalue 1 maxvalue 100 cache 1" {
+		t.Errorf("EXPECTED the missing sequence described  ACTUAL: %q", f.Expected)
+	}
+}

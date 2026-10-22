@@ -25,6 +25,7 @@ const (
 	KindView       = "view"
 	KindComment    = "comment"
 	KindEnum       = "enum"
+	KindSequence   = "sequence"
 	KindDelta      = "delta"
 	KindScript     = "script" // a script delta - sql statements or a file in deltas/scripts
 	KindPreHook    = "pre-hook"
@@ -56,7 +57,8 @@ type Step struct {
 	Tolerate []string `json:"tolerate,omitempty"`
 	// Retryable is set on state build views - apply retries a view that references a relation created after it
 	Retryable bool `json:"retryable,omitempty"`
-	// Deferred is set on a changeset's foreign keys of added tables - they are added after every delta
+	// Deferred is set on the foreign keys of tables a changeset adds and the owners of sequences it adds - they run
+	// after every delta, once every table the changeset adds exists
 	Deferred bool `json:"deferred,omitempty"`
 	// Skipped is set when the delta generates no statement - apply records it as skipped and does not run its post hook
 	Skipped bool   `json:"skipped,omitempty"`
@@ -172,6 +174,27 @@ func ForState(transactional bool) (Plan, error) {
 		}
 	}
 
+	// sequences come before the tables whose column defaults use them - they are owned once the tables exist
+	sequencePaths, err := filepath.Glob(filepath.Join(workdir, "state", "*-sequence.json"))
+	if err != nil {
+		return Plan{}, err
+	}
+	var owners []Step
+	for _, path := range sequencePaths {
+		seq, err := manifest.ParseSequenceByPath(path)
+		if err != nil {
+			return Plan{}, fmt.Errorf("unable to parse %s: %w", relative(path), err)
+		}
+		unit.Steps = append(unit.Steps, Step{Kind: KindSequence, Describe: seq.Name, Source: relative(path), Sql: []string{seq.GenerateDdl()},
+			Tolerate: []string{codeDuplicateTable}, Record: Record{Type: "Create Sequence", Name: seq.Name}})
+		if seq.Comment != "" {
+			unit.Steps = append(unit.Steps, commentStep("sequence", seq.Name, seq.Comment, relative(path), 0))
+		}
+		if seq.Ownedby != "" {
+			owners = append(owners, ownedByStep(seq, relative(path), 0))
+		}
+	}
+
 	tablePaths, err := filepath.Glob(filepath.Join(workdir, "state", "*-table.json"))
 	if err != nil {
 		return Plan{}, err
@@ -185,7 +208,8 @@ func ForState(transactional bool) (Plan, error) {
 		unit.Steps = append(unit.Steps, tableSteps(table, relative(path), 0)...)
 		fks = append(fks, fkSteps(table, relative(path), 0)...)
 	}
-	// foreign keys are added once every table exists
+	// sequences are owned and foreign keys added once every table exists
+	unit.Steps = append(unit.Steps, owners...)
 	unit.Steps = append(unit.Steps, fks...)
 
 	viewPaths, err := filepath.Glob(filepath.Join(workdir, "state", "*-view.json"))
@@ -261,7 +285,8 @@ func changesetUnit(path string) (Unit, []string, error) {
 	if !unit.Transactional {
 		warnings = append(warnings, fmt.Sprintf("changeset %s runs without a transaction - a failure part way through leaves the earlier deltas in place", cs.Version))
 	}
-	var fks []Step
+	// the foreign keys of added tables and the owners of added sequences, which may be tables the changeset adds later
+	var deferred []Step
 	for i, delta := range cs.ParsedDeltas {
 		source := fmt.Sprintf("%s#/deltas/%d", file, i)
 		position := i + 1
@@ -290,7 +315,7 @@ func changesetUnit(path string) (Unit, []string, error) {
 				// the foreign keys of added tables are added once every delta has run
 				for _, fk := range fkSteps(table, source, position) {
 					fk.Deferred = true
-					fks = append(fks, fk)
+					deferred = append(deferred, fk)
 				}
 				break
 			}
@@ -345,6 +370,13 @@ func changesetUnit(path string) (Unit, []string, error) {
 			continue // apply does not run the post hook of a skipped delta
 		}
 		unit.Steps = append(unit.Steps, addedComments(delta, source, position)...)
+		if d, ok := delta.(manifest.SimpleDelta); ok && d.Object == "sequence" && d.Action == "add" {
+			if seq, err := manifest.ParseSequenceByName(d.Name); err == nil && seq.Ownedby != "" {
+				owner := ownedByStep(seq, source, position)
+				owner.Deferred = true
+				deferred = append(deferred, owner)
+			}
+		}
 		if d, ok := delta.(manifest.SimpleDelta); ok && d.Object == "enum" && d.Action == "alter" && unit.Transactional {
 			warnings = append(warnings, fmt.Sprintf("%s: changeset %s adds the value '%s' to enum %s in a transaction - postgres does not let the value be used until the changeset commits, so use it in a later changeset", source, cs.Version, d.Value, d.Name))
 		}
@@ -358,7 +390,7 @@ func changesetUnit(path string) (Unit, []string, error) {
 			}
 		}
 	}
-	unit.Steps = append(unit.Steps, fks...)
+	unit.Steps = append(unit.Steps, deferred...)
 	// a changeset stops at its first failure
 	for i := range unit.Steps {
 		unit.Steps[i].StopOnFailure = true
@@ -439,14 +471,21 @@ func hookStep(kind string, hook manifest.Hook, delta manifest.Delta, source stri
 	return &step, nil
 }
 
-// commentStep sets the comment on a table, column (target is table.column), view or enum
+// ownedByStep makes the sequence's ownedby column its owner
+func ownedByStep(seq manifest.Sequence, source string, position int) Step {
+	describe := seq.Name + " owned by " + seq.Ownedby
+	return Step{Kind: KindSequence, Describe: describe, Source: source, Delta: position, Sql: []string{seq.OwnedByDdl()},
+		Record: Record{Type: "Alter Sequence", Name: describe}}
+}
+
+// commentStep sets the comment on a table, column (target is table.column), view, enum or sequence
 func commentStep(on string, target string, comment string, source string, position int) Step {
 	describe := on + " " + target
 	return Step{Kind: KindComment, Describe: describe, Source: source, Delta: position, Sql: []string{manifest.CommentDdl(on, target, comment)},
 		Record: Record{Type: "Comment", Name: describe}}
 }
 
-// addedComments are the comments of a view, enum or column a delta adds - a delta that adds an object creates it as its
+// addedComments are the comments of a view, enum, sequence or column a delta adds - a delta that adds an object creates it as its
 // state file describes, comment included. A table add's comments are part of its table steps
 func addedComments(delta manifest.Delta, source string, position int) []Step {
 	switch d := delta.(type) {
@@ -462,6 +501,10 @@ func addedComments(delta manifest.Delta, source string, position int) []Step {
 		case "enum":
 			if enum, err := manifest.ParseEnumByName(d.Name); err == nil && enum.Comment != "" {
 				return []Step{commentStep("enum", d.Name, enum.Comment, source, position)}
+			}
+		case "sequence":
+			if seq, err := manifest.ParseSequenceByName(d.Name); err == nil && seq.Comment != "" {
+				return []Step{commentStep("sequence", d.Name, seq.Comment, source, position)}
 			}
 		case "column":
 			if table, err := manifest.ParseTableByName(d.Reference); err == nil {
