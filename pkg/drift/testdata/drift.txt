@@ -1,0 +1,15 @@
+Drift in schema app1 (deployed 1.0.3): 4 differences
+  changed  view       document_types
+             expected: SELECT DISTINCT document_type
+                       FROM documents;
+             actual:   SELECT document_type
+                       FROM documents;
+  extra    column     documents.legacy_ref
+             actual:   text
+  changed  column     documents.priority (default)
+             expected: 0
+             actual:   5
+  missing  index      documents.documents_type_idx
+             expected: CREATE INDEX documents_type_idx ON documents USING btree (document_type)
+1 ignored (drift.ignore)
+WARNING: 2 changesets newer than the deployed version are not applied (1.0.4, 1.0.5) - differences they make show as drift. Run skima plan to see them

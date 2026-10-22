@@ -302,6 +302,41 @@ alter table documents alter column document_type set NOT NULL;
 * Like apply, plan validates the manifest first and fails if it is invalid (`--skip-validation` plans anyway)
 * The exit code is 0, or 1 on an error. With `--detailed-exitcode` it is 2 when there are changes to apply
 
+### Detecting drift
+`skima drift` reports where the schema in the database differs from what its state files describe - for example an
+index someone dropped by hand, or a column added outside skima:
+
+```
+skima drift
+Drift in schema app1 (deployed 1.0.3): 3 differences
+  extra    column     documents.legacy_ref
+             actual:   text
+  changed  column     documents.priority (default)
+             expected: 0
+             actual:   5
+  missing  index      documents.documents_type_idx
+             expected: CREATE INDEX documents_type_idx ON documents USING btree (document_type)
+```
+
+* Tables, columns (type, nullability, default, identity, generated), primary key, unique, check and foreign key
+  constraints, indexes, triggers and views are compared. Functions, grants and data are not
+* Postgres rewrites definitions when it stores them (`varchar` becomes `character varying`, check constraints and views
+  are reformatted), so drift does not compare the state files' text. It builds the state files into temporary tables
+  in a transaction that is always rolled back and compares how postgres describes those with the real schema. It
+  changes nothing, takes no apply lock and only needs the `TEMP` privilege every user has by default
+* The state files describe the latest changeset version - if newer changesets are not applied yet, the differences
+  they make show as drift and a warning lists them
+* Objects deliberately left out of the state files can be ignored with patterns matched against `table`,
+  `table.column`, `table.index` and so on, or against the object's table. They come from `drift.ignore` in the config
+  (`SKM_DRIFT_IGNORE`, separated by spaces) plus any `--ignore` flags:
+  ```yaml
+  drift:
+    ignore:
+      - legacy_*                  # every table starting legacy_, and everything on them
+      - tags.tags_label_idx       # an index created by a script delta
+  ```
+* `--output=json` gives machine readable results. With `--detailed-exitcode` the exit code is 2 when there is drift
+
 ### Validating the manifest
 Every manifest file is checked against a JSON schema for its kind - tables, views and changesets. Validation catches
 misspelled or unknown properties (property names are case sensitive and lowercase, as documented below), missing required

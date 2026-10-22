@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"skima/pkg/plan"
 	"skima/pkg/util"
@@ -19,7 +20,7 @@ func ApplyUnit(history *ApplyHistory, unit plan.Unit) int {
 	if r == nil {
 		return 1
 	}
-	return r.finish(executor{ex: r.ex, record: recordStatementHist, history: history}.run(unit.Steps))
+	return r.finish(executor{ex: r.ex, record: recordStatementHist, history: history, out: os.Stdout, errOut: os.Stderr}.run(unit.Steps))
 }
 
 // runName names the run in messages, along with how to apply it without a transaction
@@ -48,6 +49,9 @@ type executor struct {
 	ex      execer
 	record  recordFunc
 	history *ApplyHistory
+	// out and errOut receive the progress and failure messages
+	out    io.Writer
+	errOut io.Writer
 }
 
 // run executes the steps, returning the number of failures. A failed step with StopOnFailure stops the run, other
@@ -95,7 +99,7 @@ func stoppedStatus(step plan.Step) string {
 func (e executor) retryViews(views []plan.Step) int {
 	failures := 0
 	for pass := 0; pass < maxViewPasses && len(views) > 0; pass++ {
-		fmt.Printf("Retrying %d views\n", len(views))
+		fmt.Fprintf(e.out, "Retrying %d views\n", len(views))
 		var again []plan.Step
 		for _, view := range views {
 			ok, missingRelation := e.step(view)
@@ -118,7 +122,7 @@ func (e executor) retryViews(views []plan.Step) int {
 // skip records a delta that generates no DDL
 func (e executor) skip(step plan.Step) {
 	stmtId, err := e.record(e.history, step.Record.Type, "deltaSkipped", "No DDL Generated")
-	fmt.Fprintf(os.Stderr, "WARNING: applying %s was skipped due to no DDL - this could be due to a downstream change that removed this reference object from the state definition - Statement ID: %d\n", step.Describe, stmtId)
+	fmt.Fprintf(e.errOut, "WARNING: applying %s was skipped due to no DDL - this could be due to a downstream change that removed this reference object from the state definition - Statement ID: %d\n", step.Describe, stmtId)
 	checkErr(err, "Unable to record the statement history for applying the delta")
 }
 
@@ -143,9 +147,9 @@ func (e executor) step(step plan.Step) (ok bool, missingRelation bool) {
 	if !step.Record.PerStatement {
 		stmtId, err := e.record(e.history, step.Record.Type, "success", step.Record.Name)
 		if toleratedErr != nil {
-			fmt.Printf("SUCCESS: %s - tolerated [%s] %s - Statement ID: %d\n", stepName(step), toleratedErr.Code, toleratedErr.Message, stmtId)
+			fmt.Fprintf(e.out, "SUCCESS: %s - tolerated [%s] %s - Statement ID: %d\n", stepName(step), toleratedErr.Code, toleratedErr.Message, stmtId)
 		} else {
-			fmt.Printf("SUCCESS: %s - Statement ID: %d\n", stepName(step), stmtId)
+			fmt.Fprintf(e.out, "SUCCESS: %s - Statement ID: %d\n", stepName(step), stmtId)
 		}
 		checkErr(err, "Unable to record the statement history for "+stepName(step))
 	}
@@ -158,12 +162,12 @@ func (e executor) statementSucceeded(step plan.Step, idx int, sql string, pgErr 
 	stmtType := fmt.Sprintf("%s sql [%d]", step.Record.Type, idx)
 	if pgErr != nil {
 		stmtId, err := e.record(e.history, stmtType, "success", fmt.Sprintf("{[%s] %s} - %s", pgErr.Code, pgErr.Message, sql))
-		fmt.Printf("SUCCESS: sql %s at index [%d] marked as success because failure was due to acceptable condition [%s] %s  Statement ID: %d\n", step.Record.Type, idx, pgErr.Code, pgErr.Message, stmtId)
+		fmt.Fprintf(e.out, "SUCCESS: sql %s at index [%d] marked as success because failure was due to acceptable condition [%s] %s  Statement ID: %d\n", step.Record.Type, idx, pgErr.Code, pgErr.Message, stmtId)
 		checkErr(err, "Unable to record the statement history for 'SQL statement'")
 		return
 	}
 	stmtId, err := e.record(e.history, stmtType, "success", sql)
-	fmt.Printf("SUCCESS: sql %s at index [%d] Statement ID: %d\n", step.Record.Type, idx, stmtId)
+	fmt.Fprintf(e.out, "SUCCESS: sql %s at index [%d] Statement ID: %d\n", step.Record.Type, idx, stmtId)
 	checkErr(err, "Unable to record the statement history for 'SQL statement'")
 }
 
@@ -173,11 +177,11 @@ func (e executor) failed(step plan.Step, idx int, sql string, execErr error, pgE
 		stmtType := fmt.Sprintf("%s sql [%d]", step.Record.Type, idx)
 		if pgErr != nil {
 			stmtId, err := e.record(e.history, stmtType, "failed", fmt.Sprintf("{[%s] %s} - %s", pgErr.Code, pgErr.Message, sql))
-			fmt.Fprintf(os.Stderr, "FAILURE: sql %s at index [%d] marked as failed because failure was due to unacceptable condition [%s] %s  Statement ID: %d\n", step.Record.Type, idx, pgErr.Code, pgErr.Message, stmtId)
+			fmt.Fprintf(e.errOut, "FAILURE: sql %s at index [%d] marked as failed because failure was due to unacceptable condition [%s] %s  Statement ID: %d\n", step.Record.Type, idx, pgErr.Code, pgErr.Message, stmtId)
 			checkErr(err, "Unable to record the statement history for 'SQL statement'")
 		} else {
 			stmtId, err := e.record(e.history, stmtType, "failed", execErr.Error())
-			fmt.Fprintf(os.Stderr, "FAILURE: executing sql based %s; statement index [%d] - Statement ID: %d\n%s\n", step.Record.Type, idx, stmtId, execErr)
+			fmt.Fprintf(e.errOut, "FAILURE: executing sql based %s; statement index [%d] - Statement ID: %d\n%s\n", step.Record.Type, idx, stmtId, execErr)
 			checkErr(err, "Unable to record the statement history for 'SQL statement'")
 		}
 		return
@@ -188,12 +192,12 @@ func (e executor) failed(step plan.Step, idx int, sql string, execErr error, pgE
 	}
 	stmtId, err := e.record(e.history, stmtType, "failed", execErr.Error())
 	if pgErr != nil && pgErr.Code == codeUndefinedTable && step.Retryable {
-		fmt.Fprintf(os.Stderr, "  %s references a relation that does not exist yet: %s\n", stepName(step), pgErr.Message)
+		fmt.Fprintf(e.errOut, "  %s references a relation that does not exist yet: %s\n", stepName(step), pgErr.Message)
 	}
 	if step.Script == "" {
-		fmt.Println(sql) // a file's statements are not printed - it is named instead
+		fmt.Fprintln(e.out, sql) // a file's statements are not printed - it is named instead
 	}
-	fmt.Fprintf(os.Stderr, "FAILURE: %s - Statement ID: %d\n %s\n", stepName(step), stmtId, execErr)
+	fmt.Fprintf(e.errOut, "FAILURE: %s - Statement ID: %d\n %s\n", stepName(step), stmtId, execErr)
 	checkErr(err, "Unable to record the statement history for "+stepName(step))
 }
 

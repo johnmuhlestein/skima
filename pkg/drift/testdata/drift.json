@@ -1,0 +1,38 @@
+{
+  "schema": "app1",
+  "deployed": "1.0.3",
+  "pending": [
+    "1.0.4",
+    "1.0.5"
+  ],
+  "findings": [
+    {
+      "change": "changed",
+      "object": "view",
+      "name": "document_types",
+      "expected": " SELECT DISTINCT document_type\n   FROM documents;",
+      "actual": " SELECT document_type\n   FROM documents;"
+    },
+    {
+      "change": "extra",
+      "object": "column",
+      "name": "documents.legacy_ref",
+      "actual": "text"
+    },
+    {
+      "change": "changed",
+      "object": "column",
+      "name": "documents.priority",
+      "attribute": "default",
+      "expected": "0",
+      "actual": "5"
+    },
+    {
+      "change": "missing",
+      "object": "index",
+      "name": "documents.documents_type_idx",
+      "expected": "CREATE INDEX documents_type_idx ON documents USING btree (document_type)"
+    }
+  ],
+  "ignored": 1
+}
