@@ -12,9 +12,24 @@ import (
 
 // Schema is the tables and views of a schema, as the postgres catalog describes them
 type Schema struct {
-	Tables map[string]*Table
-	Views  map[string]View
-	Enums  map[string]Enum
+	Tables    map[string]*Table
+	Views     map[string]View
+	Enums     map[string]Enum
+	Sequences map[string]Sequence
+}
+
+// Sequence is a sequence's settings, owner and comment - sequences of identity columns are compared as the column
+type Sequence struct {
+	Type      string // format_type of the sequence's data type, e.g. "bigint"
+	Start     int64
+	Increment int64
+	Min       int64
+	Max       int64
+	Cache     int64
+	Cycle     bool
+	// OwnedBy is the table.column that owns the sequence, empty when no column does
+	OwnedBy string
+	Comment string
 }
 
 // Enum is an enum type's values, in sort order, and comment
@@ -55,7 +70,7 @@ type Column struct {
 
 // NewSchema returns an empty schema
 func NewSchema() Schema {
-	return Schema{Tables: map[string]*Table{}, Views: map[string]View{}, Enums: map[string]Enum{}}
+	return Schema{Tables: map[string]*Table{}, Views: map[string]View{}, Enums: map[string]Enum{}, Sequences: map[string]Sequence{}}
 }
 
 // Table returns the named table, adding it when the schema does not have it yet
@@ -96,19 +111,20 @@ const (
 // Finding is one difference between the schema in the database and the schema its state files describe
 type Finding struct {
 	Change string `json:"change"` // missing, extra or changed
-	Object string `json:"object"` // table, column, constraint, index, trigger, view or enum
+	Object string `json:"object"` // table, column, constraint, index, trigger, view, enum or sequence
 	// Name is the object's name - qualified by its table for columns, constraints, indexes and triggers
 	Name string `json:"name"`
 	// Attribute is the part of a changed object that differs: a column's type, nullable, default, identity or
-	// generated, or the comment of a table, column, view or enum
+	// generated, a sequence's type, start, increment, minvalue, maxvalue, cache, cycle or owned by, or the comment of a
+	// table, column, view, enum or sequence
 	Attribute string `json:"attribute,omitempty"`
 	Expected  string `json:"expected,omitempty"`
 	Actual    string `json:"actual,omitempty"`
 }
 
-// table is the table a finding belongs to - its name, for a table, view or enum
+// table is the table a finding belongs to - its name, for a table, view, enum or sequence
 func (f Finding) table() string {
-	if f.Object == "table" || f.Object == "view" || f.Object == "enum" {
+	if f.Object == "table" || f.Object == "view" || f.Object == "enum" || f.Object == "sequence" {
 		return f.Name
 	}
 	table, _, _ := strings.Cut(f.Name, ".")
@@ -140,8 +156,9 @@ func Compare(expected Schema, actual Schema) []Finding {
 	}
 	findings = append(findings, compareViews(expected.Views, actual.Views)...)
 	findings = append(findings, compareEnums(expected.Enums, actual.Enums)...)
+	findings = append(findings, compareSequences(expected.Sequences, actual.Sequences)...)
 
-	objectOrder := map[string]int{"table": 0, "view": 0, "enum": 0, "column": 1, "constraint": 2, "index": 3, "trigger": 4}
+	objectOrder := map[string]int{"table": 0, "view": 0, "enum": 0, "sequence": 0, "column": 1, "constraint": 2, "index": 3, "trigger": 4}
 	sort.Slice(findings, func(i, j int) bool {
 		a, b := findings[i], findings[j]
 		if a.table() != b.table() {
@@ -248,6 +265,52 @@ func compareEnums(expected map[string]Enum, actual map[string]Enum) []Finding {
 		}
 	}
 	return findings
+}
+
+// compareSequences compares sequences setting by setting. A sequence the state files do not define is extra only when
+// no column owns it - an owned sequence (e.g. a serial column's) belongs to its column, which is compared instead
+func compareSequences(expected map[string]Sequence, actual map[string]Sequence) []Finding {
+	var findings []Finding
+	for name, exp := range expected {
+		act, ok := actual[name]
+		if !ok {
+			findings = append(findings, Finding{Change: Missing, Object: "sequence", Name: name, Expected: exp.String()})
+			continue
+		}
+		changed := func(attribute string, expected string, actual string) {
+			if expected != actual {
+				findings = append(findings, Finding{Change: Changed, Object: "sequence", Name: name, Attribute: attribute, Expected: expected, Actual: actual})
+			}
+		}
+		number := func(n int64) string { return fmt.Sprint(n) }
+		changed("type", exp.Type, act.Type)
+		changed("start", number(exp.Start), number(act.Start))
+		changed("increment", number(exp.Increment), number(act.Increment))
+		changed("minvalue", number(exp.Min), number(act.Min))
+		changed("maxvalue", number(exp.Max), number(act.Max))
+		changed("cache", number(exp.Cache), number(act.Cache))
+		changed("cycle", fmt.Sprint(exp.Cycle), fmt.Sprint(act.Cycle))
+		changed("owned by", orNone(exp.OwnedBy), orNone(act.OwnedBy))
+		changed("comment", orNone(exp.Comment), orNone(act.Comment))
+	}
+	for name, act := range actual {
+		if _, ok := expected[name]; !ok && act.OwnedBy == "" {
+			findings = append(findings, Finding{Change: Extra, Object: "sequence", Name: name, Actual: act.String()})
+		}
+	}
+	return findings
+}
+
+// String describes the sequence, e.g. "bigint start 1000 increment 5 owned by tags.seq_no"
+func (s Sequence) String() string {
+	described := fmt.Sprintf("%s start %d increment %d minvalue %d maxvalue %d cache %d", s.Type, s.Start, s.Increment, s.Min, s.Max, s.Cache)
+	if s.Cycle {
+		described += " cycle"
+	}
+	if s.OwnedBy != "" {
+		described += " owned by " + s.OwnedBy
+	}
+	return described
 }
 
 func commentFinding(object string, name string, expected string, actual string) Finding {

@@ -1,4 +1,4 @@
-Plan for schema app1: deployed 1.0.0 -> 1.0.3 (3 changesets, 23 statements)
+Plan for schema app1: deployed 1.0.0 -> 1.0.3 (3 changesets, 27 statements)
 
 == changeset 1.0.1  deltas/v1_0_1.json  [transaction]
 -- tag documents and track their priority
@@ -6,16 +6,22 @@ Plan for schema app1: deployed 1.0.0 -> 1.0.3 (3 changesets, 23 statements)
 create type tag_color as enum ('red', 'green', 'blue');
 -- [1] comment enum tag_color
 comment on type tag_color is 'Colors a tag can have';
--- [2] table tags
-create table if not exists tags (id integer primary key generated always as identity,document_id uuid not null,label text not null,color tag_color);
--- [3] add column documents.priority  (tolerates 42P07, 42710)
+-- [2] add sequence tag_seq  (tolerates 42P07, 42710)
+create sequence tag_seq increment by 5 start with 1000 cache 10;
+-- [2] comment sequence tag_seq
+comment on sequence tag_seq is 'Numbers tags';
+-- [3] table tags
+create table if not exists tags (id integer primary key generated always as identity,document_id uuid not null,label text not null,color tag_color,seq_no bigint default nextval('tag_seq'));
+-- [4] add column documents.priority  (tolerates 42P07, 42710)
 alter table documents add column if not exists priority integer default 0;
--- [3] comment column documents.priority
+-- [4] comment column documents.priority
 comment on column documents.priority is 'Higher is processed sooner';
--- [3] post-hook add column documents.priority
+-- [4] post-hook add column documents.priority
 --   runs deltas/scripts/backfill_priority.sql (--show-scripts prints it)
--- [4] add index documents.documents_type_idx  (tolerates 42P07, 42710)
+-- [5] add index documents.documents_type_idx  (tolerates 42P07, 42710)
 create  index if not exists documents_type_idx on documents (document_type);
+-- [end] sequence tag_seq owned by tags.seq_no  (deferred to the end of the changeset)
+alter sequence tag_seq owned by tags.seq_no;
 -- [end] fk tags.tags_document_fk  (deferred to the end of the changeset; tolerates 42710)
 alter table tags add constraint tags_document_fk foreign key (document_id) references documents (id);
 
@@ -42,6 +48,8 @@ comment on column documents.document_type is 'STRUCTURED or UNSTRUCTURED - it''s
 comment on table tags is null;
 -- [9] alter enum tag_color (add value 'blue')  (tolerates 42P07, 42710)
 alter type tag_color add value if not exists 'blue' after 'green';
+-- [10] alter sequence tag_seq  (tolerates 42P07, 42710)
+alter sequence tag_seq as bigint increment by 5 no minvalue no maxvalue cache 10 no cycle owned by tags.seq_no;
 
 == changeset 1.0.3  deltas/v1_0_3.json  [NO TRANSACTION - a failure part way through is not rolled back]
 -- index without locking and refresh the view

@@ -37,6 +37,25 @@
           ]
         },
         {
+          "kind": "sequence",
+          "describe": "tag_seq",
+          "source": "state/tag_seq-sequence.json",
+          "sql": [
+            "create sequence tag_seq increment by 5 start with 1000 cache 10"
+          ],
+          "tolerate": [
+            "42P07"
+          ]
+        },
+        {
+          "kind": "comment",
+          "describe": "sequence tag_seq",
+          "source": "state/tag_seq-sequence.json",
+          "sql": [
+            "comment on sequence tag_seq is 'Numbers tags'"
+          ]
+        },
+        {
           "kind": "table",
           "describe": "documents",
           "source": "state/documents-table.json",
@@ -132,7 +151,15 @@
           "describe": "tags",
           "source": "state/tags-table.json",
           "sql": [
-            "create table if not exists tags (id integer primary key generated always as identity,document_id uuid not null,label text not null,color tag_color) "
+            "create table if not exists tags (id integer primary key generated always as identity,document_id uuid not null,label text not null,color tag_color,seq_no bigint default nextval('tag_seq')) "
+          ]
+        },
+        {
+          "kind": "sequence",
+          "describe": "tag_seq owned by tags.seq_no",
+          "source": "state/tag_seq-sequence.json",
+          "sql": [
+            "alter sequence tag_seq owned by tags.seq_no"
           ]
         },
         {

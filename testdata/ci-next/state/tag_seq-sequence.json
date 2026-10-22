@@ -1,0 +1,8 @@
+{
+  "name" : "tag_seq",
+  "start" : 1000,
+  "increment" : 5,
+  "cache" : 10,
+  "ownedby" : "tags.seq_no",
+  "comment" : "Numbers tags"
+}

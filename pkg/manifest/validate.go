@@ -34,6 +34,7 @@ const (
 	KindTable     FileKind = "table"
 	KindView      FileKind = "view"
 	KindEnum      FileKind = "enum"
+	KindSequence  FileKind = "sequence"
 	KindChangeset FileKind = "changeset"
 )
 
@@ -90,7 +91,7 @@ var compileErr error
 func schemaFor(kind FileKind) (*jsonschema.Schema, error) {
 	compileOnce.Do(func() {
 		compiler := jsonschema.NewCompiler()
-		kinds := []FileKind{KindTable, KindView, KindEnum, KindChangeset}
+		kinds := []FileKind{KindTable, KindView, KindEnum, KindSequence, KindChangeset}
 		for _, k := range kinds {
 			name := fmt.Sprintf("%s.schema.json", k)
 			raw, err := schemaFiles.ReadFile("schemas/" + name)
@@ -136,6 +137,8 @@ func KindOf(path string) (FileKind, bool) {
 		return KindView, true
 	case strings.HasSuffix(base, "-enum.json"):
 		return KindEnum, true
+	case strings.HasSuffix(base, "-sequence.json"):
+		return KindSequence, true
 	case filepath.Ext(base) == ".json" && filepath.Base(filepath.Dir(path)) == "deltas":
 		return KindChangeset, true
 	}
@@ -266,10 +269,11 @@ func jsonPointer(tokens []string) string {
 	return bld.String()
 }
 
-// StateFiles returns the table, view and enum state files in the working directory, the files a state build applies
+// StateFiles returns the table, view, enum and sequence state files in the working directory, the files a state build
+// applies
 func StateFiles(workdir string) ([]string, error) {
 	var files []string
-	for _, suffix := range []string{"-table.json", "-view.json", "-enum.json"} {
+	for _, suffix := range []string{"-table.json", "-view.json", "-enum.json", "-sequence.json"} {
 		matches, err := filepath.Glob(filepath.Join(workdir, "state", "*"+suffix))
 		if err != nil {
 			return nil, err
@@ -303,7 +307,7 @@ func ValidateManifest(workdir string, errorsAfter *util.SemanticVersion) ([]File
 	for _, path := range allStateJson {
 		if _, ok := KindOf(path); !ok {
 			ignored := FileValidation{File: path, Issues: []ValidationIssue{{
-				Message: "not a table (<name>-table.json), view (<name>-view.json) or enum (<name>-enum.json) file - skima ignores it",
+				Message: "not a table (<name>-table.json), view (<name>-view.json), enum (<name>-enum.json) or sequence (<name>-sequence.json) file - skima ignores it",
 			}}}
 			ignored.finish()
 			results = append(results, ignored)

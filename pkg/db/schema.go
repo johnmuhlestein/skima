@@ -20,8 +20,8 @@ type querier interface {
 
 // ReadSchemas reads the configured schema as it is in the database (actual) and as the state build describes it
 // (expected). The expected schema comes from building the unit's steps into the session's temporary schema, in a
-// transaction that is always rolled back - with pg_temp first on the search path, the state build's enums, tables,
-// indexes, constraints, triggers and views are created as temporary objects, and postgres normalizes their definitions exactly
+// transaction that is always rolled back - with pg_temp first on the search path, the state build's enums, sequences,
+// tables, indexes, constraints, triggers and views are created as temporary objects, and postgres normalizes their definitions exactly
 // as it did the real ones. Pass the state build without its post sql files, which load data. It only needs the TEMP
 // privilege, takes no apply lock and changes nothing
 func ReadSchemas(stateBuild plan.Unit) (actual drift.Schema, expected drift.Schema, err error) {
@@ -113,6 +113,18 @@ const enumsQuery = `select t.typname, array_agg(e.enumlabel order by e.enumsorto
 	where t.typnamespace = $1
 	group by t.oid, t.typname`
 
+// sequences of identity columns (an 'i' dependency on their column) are compared as the column. The owner is the
+// column of an 'a' (auto) dependency - set by owned by, or by a serial column
+const sequencesQuery = `select c.relname, format_type(s.seqtypid, null), s.seqstart, s.seqincrement, s.seqmin, s.seqmax, s.seqcache, s.seqcycle,
+		coalesce((select t.relname || '.' || a.attname from pg_depend d
+			join pg_class t on t.oid = d.refobjid
+			join pg_attribute a on a.attrelid = d.refobjid and a.attnum = d.refobjsubid
+			where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'a' and d.refobjsubid > 0), ''),
+		coalesce(obj_description(c.oid, 'pg_class'), '')
+	from pg_class c join pg_sequence s on s.seqrelid = c.oid
+	where c.relnamespace = $1 and c.relkind = 'S' and not exists (
+		select 1 from pg_depend d where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'i')`
+
 const viewsQuery = `select c.relname, pg_get_viewdef(c.oid), coalesce(obj_description(c.oid, 'pg_class'), '') from pg_class c where c.relnamespace = $1 and c.relkind = 'v'`
 
 // readSchema reads the tables and views in the namespace. prefix is the schema name as postgres prints it in index and
@@ -162,6 +174,13 @@ func readSchema(ctx context.Context, q querier, namespace uint32, prefix string)
 			var enum drift.Enum
 			err := rows.Scan(&name, &enum.Values, &enum.Comment)
 			s.Enums[name] = enum
+			return err
+		}},
+		{sequencesQuery, func(rows pgx.Rows) error {
+			var name string
+			var seq drift.Sequence
+			err := rows.Scan(&name, &seq.Type, &seq.Start, &seq.Increment, &seq.Min, &seq.Max, &seq.Cache, &seq.Cycle, &seq.OwnedBy, &seq.Comment)
+			s.Sequences[name] = seq
 			return err
 		}},
 		{viewsQuery, func(rows pgx.Rows) error {

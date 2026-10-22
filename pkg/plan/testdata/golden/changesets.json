@@ -33,19 +33,41 @@
           ]
         },
         {
-          "kind": "table",
-          "describe": "tags",
+          "kind": "delta",
+          "describe": "add sequence tag_seq",
           "source": "deltas/v1_0_1.json#/deltas/1",
           "delta": 2,
           "sql": [
-            "create table if not exists tags (id integer primary key generated always as identity,document_id uuid not null,label text not null,color tag_color) "
+            "create sequence tag_seq increment by 5 start with 1000 cache 10"
+          ],
+          "tolerate": [
+            "42P07",
+            "42710"
+          ]
+        },
+        {
+          "kind": "comment",
+          "describe": "sequence tag_seq",
+          "source": "deltas/v1_0_1.json#/deltas/1",
+          "delta": 2,
+          "sql": [
+            "comment on sequence tag_seq is 'Numbers tags'"
+          ]
+        },
+        {
+          "kind": "table",
+          "describe": "tags",
+          "source": "deltas/v1_0_1.json#/deltas/2",
+          "delta": 3,
+          "sql": [
+            "create table if not exists tags (id integer primary key generated always as identity,document_id uuid not null,label text not null,color tag_color,seq_no bigint default nextval('tag_seq')) "
           ]
         },
         {
           "kind": "delta",
           "describe": "add column documents.priority",
-          "source": "deltas/v1_0_1.json#/deltas/2",
-          "delta": 3,
+          "source": "deltas/v1_0_1.json#/deltas/3",
+          "delta": 4,
           "sql": [
             "alter table documents add column if not exists priority integer default 0"
           ],
@@ -57,8 +79,8 @@
         {
           "kind": "comment",
           "describe": "column documents.priority",
-          "source": "deltas/v1_0_1.json#/deltas/2",
-          "delta": 3,
+          "source": "deltas/v1_0_1.json#/deltas/3",
+          "delta": 4,
           "sql": [
             "comment on column documents.priority is 'Higher is processed sooner'"
           ]
@@ -66,8 +88,8 @@
         {
           "kind": "post-hook",
           "describe": "add column documents.priority",
-          "source": "deltas/v1_0_1.json#/deltas/2",
-          "delta": 3,
+          "source": "deltas/v1_0_1.json#/deltas/3",
+          "delta": 4,
           "script": "deltas/scripts/backfill_priority.sql",
           "sql": [
             "update documents set priority = 1 where document_type = 'STRUCTURED';\nupdate documents set priority = 0 where priority is null;\n"
@@ -76,8 +98,8 @@
         {
           "kind": "delta",
           "describe": "add index documents.documents_type_idx",
-          "source": "deltas/v1_0_1.json#/deltas/3",
-          "delta": 4,
+          "source": "deltas/v1_0_1.json#/deltas/4",
+          "delta": 5,
           "sql": [
             "create  index if not exists documents_type_idx on documents (document_type)"
           ],
@@ -87,10 +109,20 @@
           ]
         },
         {
-          "kind": "fk",
-          "describe": "tags.tags_document_fk",
+          "kind": "sequence",
+          "describe": "tag_seq owned by tags.seq_no",
           "source": "deltas/v1_0_1.json#/deltas/1",
           "delta": 2,
+          "sql": [
+            "alter sequence tag_seq owned by tags.seq_no"
+          ],
+          "deferred": true
+        },
+        {
+          "kind": "fk",
+          "describe": "tags.tags_document_fk",
+          "source": "deltas/v1_0_1.json#/deltas/2",
+          "delta": 3,
           "sql": [
             "alter table tags add constraint tags_document_fk foreign key (document_id) references documents (id)"
           ],
@@ -230,6 +262,19 @@
           "delta": 9,
           "sql": [
             "alter type tag_color add value if not exists 'blue' after 'green'"
+          ],
+          "tolerate": [
+            "42P07",
+            "42710"
+          ]
+        },
+        {
+          "kind": "delta",
+          "describe": "alter sequence tag_seq",
+          "source": "deltas/v1_0_2.json#/deltas/9",
+          "delta": 10,
+          "sql": [
+            "alter sequence tag_seq as bigint increment by 5 no minvalue no maxvalue cache 10 no cycle owned by tags.seq_no"
           ],
           "tolerate": [
             "42P07",

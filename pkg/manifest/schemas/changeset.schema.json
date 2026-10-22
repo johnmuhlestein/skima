@@ -51,7 +51,7 @@
       "required": ["object"],
       "properties": {
         "object": {
-          "enum": ["table", "view", "function", "index", "trigger", "pk", "fk", "constraint", "column", "script", "comment", "enum"]
+          "enum": ["table", "view", "function", "index", "trigger", "pk", "fk", "constraint", "column", "script", "comment", "enum", "sequence"]
         }
       },
       "allOf": [
@@ -66,7 +66,8 @@
         { "if": { "$ref": "#/$defs/isObject/column" }, "then": { "$ref": "#/$defs/columnDelta" } },
         { "if": { "$ref": "#/$defs/isObject/script" }, "then": { "$ref": "#/$defs/scriptDelta" } },
         { "if": { "$ref": "#/$defs/isObject/comment" }, "then": { "$ref": "#/$defs/commentDelta" } },
-        { "if": { "$ref": "#/$defs/isObject/enumType" }, "then": { "$ref": "#/$defs/enumDelta" } }
+        { "if": { "$ref": "#/$defs/isObject/enumType" }, "then": { "$ref": "#/$defs/enumDelta" } },
+        { "if": { "$ref": "#/$defs/isObject/sequence" }, "then": { "$ref": "#/$defs/sequenceDelta" } }
       ]
     },
     "isObject": {
@@ -81,7 +82,8 @@
       "column": { "required": ["object"], "properties": { "object": { "const": "column" } } },
       "script": { "required": ["object"], "properties": { "object": { "const": "script" } } },
       "comment": { "required": ["object"], "properties": { "object": { "const": "comment" } } },
-      "enumType": { "required": ["object"], "properties": { "object": { "const": "enum" } } }
+      "enumType": { "required": ["object"], "properties": { "object": { "const": "enum" } } },
+      "sequence": { "required": ["object"], "properties": { "object": { "const": "sequence" } } }
     },
     "namedDelta": {
       "description": "table, view and function deltas - the definition comes from the state files by name",
@@ -202,7 +204,7 @@
       "properties": {
         "object": true,
         "action": { "$ref": "#/$defs/addDrop" },
-        "on": { "enum": ["table", "column", "view", "enum"] },
+        "on": { "enum": ["table", "column", "view", "enum", "sequence"] },
         "name": { "$ref": "#/$defs/name" },
         "reference": { "$ref": "#/$defs/name" },
         "pre": { "$ref": "#/$defs/hook" },
@@ -227,6 +229,18 @@
       "if": { "required": ["action"], "properties": { "action": { "const": "alter" } } },
       "then": { "required": ["value"] },
       "else": { "not": { "required": ["value"] } }
+    },
+    "sequenceDelta": {
+      "description": "sequence deltas - add creates the sequence from its state file, drop drops it, alter brings its settings and owner in line with the state file without restarting it",
+      "required": ["action", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "object": true,
+        "action": { "enum": ["add", "drop", "alter"] },
+        "name": { "$ref": "#/$defs/name" },
+        "pre": { "$ref": "#/$defs/hook" },
+        "post": { "$ref": "#/$defs/hook" }
+      }
     },
     "scriptDelta": {
       "description": "SQL deltas - either inline sql statements or a script file in deltas/scripts",

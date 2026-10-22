@@ -2,6 +2,7 @@
   "description" : "the next release of the testdata/ci schema - applied by CI on top of its state build",
   "deltas" : [
     { "object" : "enum", "action" : "add", "name" : "tag_color" },
+    { "object" : "sequence", "action" : "add", "name" : "tag_seq" },
     { "object" : "table", "action" : "add", "name" : "tags" },
     {
       "object" : "column", "action" : "add", "name" : "description", "reference" : "projects",
