@@ -1,62 +1,23 @@
 {
-  "name": "documents",
-  "columns": [
+  "name" : "documents",
+  "columns" : [
+    { "name" : "id", "datatype" : "uuid", "nullable" : false },
+    { "name" : "project_id", "datatype" : "uuid", "nullable" : false },
+    { "name" : "file_location", "datatype" : "text", "nullable" : true, "comment" : "Where the file is stored" },
+    { "name" : "created_at", "datatype" : "timestamptz", "nullable" : false, "default" : "NOW()", "dfltfunc" : true }
+  ],
+  "primary-key" : ["id"],
+  "foreign-keys" : [
     {
-      "name": "id",
-      "datatype": "uuid",
-      "nullable": false
-    },
-    {
-      "name": "project_id",
-      "datatype": "uuid",
-      "nullable": false
-    },
-    {
-      "name": "file_location",
-      "datatype": "text",
-      "nullable": true,
-      "comment": "Where the file is stored"
-    },
-    {
-      "name": "created_at",
-      "datatype": "timestamptz",
-      "nullable": false,
-      "default": "NOW()",
-      "dfltfunc": true
+      "name" : "documents_project_fk",
+      "columns" : ["project_id"],
+      "reference" : { "table" : "projects", "columns" : ["id"] }
     }
   ],
-  "primary-key": [
-    "id"
+  "indexes" : [
+    { "name" : "documents_created_idx", "columns" : ["created_at"] }
   ],
-  "foreign-keys": [
-    {
-      "name": "documents_project_fk",
-      "columns": [
-        "project_id"
-      ],
-      "reference": {
-        "table": "projects",
-        "columns": [
-          "id"
-        ]
-      }
-    }
-  ],
-  "indexes": [
-    {
-      "name": "documents_created_idx",
-      "columns": [
-        "created_at"
-      ]
-    }
-  ],
-  "constraints": [
-    {
-      "name": "documents_file_location_unq",
-      "type": "unique",
-      "columns": [
-        "file_location"
-      ]
-    }
+  "constraints" : [
+    { "name" : "documents_file_location_unq", "type" : "unique", "columns" : ["file_location"] }
   ]
 }

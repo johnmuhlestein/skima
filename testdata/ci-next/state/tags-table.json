@@ -1,37 +1,16 @@
 {
-  "name": "tags",
-  "columns": [
-    {
-      "name": "id",
-      "datatype": "integer",
-      "nullable": false,
-      "primarykey": true,
-      "generate": "always"
-    },
-    {
-      "name": "document_id",
-      "datatype": "uuid",
-      "nullable": false
-    },
-    {
-      "name": "label",
-      "datatype": "text",
-      "nullable": false
-    }
+  "name" : "tags",
+  "comment" : "Labels on documents",
+  "columns" : [
+    { "name" : "id", "datatype" : "integer", "nullable" : false, "primarykey" : true, "generate" : "always" },
+    { "name" : "document_id", "datatype" : "uuid", "nullable" : false },
+    { "name" : "label", "datatype" : "text", "nullable" : false }
   ],
-  "foreign-keys": [
+  "foreign-keys" : [
     {
-      "name": "tags_document_fk",
-      "columns": [
-        "document_id"
-      ],
-      "reference": {
-        "table": "documents",
-        "columns": [
-          "id"
-        ]
-      }
+      "name" : "tags_document_fk",
+      "columns" : ["document_id"],
+      "reference" : { "table" : "documents", "columns" : ["id"] }
     }
-  ],
-  "comment": "Labels on documents"
+  ]
 }

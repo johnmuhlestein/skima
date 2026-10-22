@@ -1,24 +1,10 @@
 {
-  "name": "projects",
-  "columns": [
-    {
-      "name": "id",
-      "datatype": "uuid",
-      "nullable": false
-    },
-    {
-      "name": "name",
-      "datatype": "text",
-      "nullable": false
-    },
-    {
-      "name": "description",
-      "datatype": "text",
-      "nullable": true
-    }
+  "name" : "projects",
+  "comment" : "Projects - a project owns its documents",
+  "columns" : [
+    { "name" : "id", "datatype" : "uuid", "nullable" : false },
+    { "name" : "name", "datatype" : "text", "nullable" : false },
+    { "name" : "description", "datatype" : "text", "nullable" : true }
   ],
-  "primary-key": [
-    "id"
-  ],
-  "comment": "Projects - a project owns its documents"
+  "primary-key" : ["id"]
 }
