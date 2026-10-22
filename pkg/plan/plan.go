@@ -108,6 +108,19 @@ type Plan struct {
 	Warnings []string `json:"warnings,omitempty"`
 }
 
+// WithoutPostSql returns the unit without the state build's post sql files - they load data rather than define the
+// schema
+func (u Unit) WithoutPostSql() Unit {
+	steps := make([]Step, 0, len(u.Steps))
+	for _, step := range u.Steps {
+		if step.Kind != KindSql || !strings.HasPrefix(step.Source, "state/sql/post/") {
+			steps = append(steps, step)
+		}
+	}
+	u.Steps = steps
+	return u
+}
+
 // Pending reports whether applying would change anything
 func (p Plan) Pending() bool {
 	return len(p.Units) > 0

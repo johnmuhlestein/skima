@@ -267,3 +267,21 @@ func TestDeltaTolerates(t *testing.T) {
 		}
 	}
 }
+
+// drift builds the state files without the post sql files, which load data
+func TestWithoutPostSql(t *testing.T) {
+	useManifest(t, fixture)
+	p, err := ForState(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all, schema := p.Units[0].Steps, p.Units[0].WithoutPostSql().Steps
+	if len(schema) != len(all)-1 || schema[0].Source != "state/sql/pre/update_last_modified_at.sql" {
+		t.Errorf("EXPECTED only state/sql/post/seed_projects.sql removed  ACTUAL: %d of %d steps kept", len(schema), len(all))
+	}
+	for _, step := range schema {
+		if strings.HasPrefix(step.Source, "state/sql/post/") {
+			t.Errorf("EXPECTED no post sql steps  ACTUAL: %s", step.Source)
+		}
+	}
+}

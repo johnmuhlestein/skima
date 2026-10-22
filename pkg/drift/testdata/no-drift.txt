@@ -1,0 +1,2 @@
+No drift: schema app1 (deployed 1.0.3) matches its state files
+WARNING: 1 changeset newer than the deployed version is not applied (1.0.4) - differences they make show as drift. Run skima plan to see them

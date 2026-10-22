@@ -152,3 +152,27 @@ jobs:
             "select count(*) from ci_schema.skima_schema_statements s join ci_schema.skima_schema_history h using (run_id) where h.delta_file = 'v1_0_1.json' and s.status = 'success'")
           echo "changeset 1.0.1: planned $planned statements, recorded $recorded"
           [ "$planned" = "$recorded" ]
+
+      - name: No drift after applying
+        env:
+          SKM_WORKDIR: testdata/ci-next
+        run: ./skima drift --detailed-exitcode
+
+      - name: Drift is reported
+        env:
+          SKM_WORKDIR: testdata/ci-next
+        run: |
+          # change the schema behind skima's back
+          psql -h localhost -U postgres -d postgres \
+            -c "alter table ci_schema.documents add column legacy_ref text" \
+            -c "drop index ci_schema.documents_created_idx" \
+            -c "alter table ci_schema.projects alter column description set default 'none'"
+          ./skima drift
+          status=0
+          ./skima drift --detailed-exitcode > /dev/null || status=$?
+          [ "$status" -eq 2 ]
+          found=$(./skima drift --output=json | jq -r '[.findings[] | "\(.change) \(.object) \(.name) \(.attribute // "")" | rtrimstr(" ")] | join(";")')
+          echo "found: $found"
+          [ "$found" = "extra column documents.legacy_ref;missing index documents.documents_created_idx;changed column projects.description default" ]
+          # ignored differences are not drift
+          ./skima drift --ignore documents.legacy_ref --ignore 'documents.*_idx' --ignore projects --detailed-exitcode

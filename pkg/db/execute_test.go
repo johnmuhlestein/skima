@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"skima/pkg/plan"
 	"skima/pkg/util"
 	"strings"
@@ -64,7 +65,7 @@ func execute(steps []plan.Step, errs map[string][]error) (failures int, ex *fake
 	ex = &fakeExecer{errs: errs}
 	hist = &fakeHistory{}
 	history = &ApplyHistory{Status: "started"}
-	failures = executor{ex: ex, record: hist.record, history: history}.run(steps)
+	failures = executor{ex: ex, record: hist.record, history: history, out: io.Discard, errOut: io.Discard}.run(steps)
 	return failures, ex, hist, history
 }
 

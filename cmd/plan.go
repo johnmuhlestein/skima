@@ -72,10 +72,10 @@ func runPlan(from string) {
 	var err error
 	deployed, managed := deployedVersion(from)
 	if managed {
-		planValidation(pendingChangesets(deployed))
+		validateOrExit(pendingChangesets(deployed), "skima apply would not apply anything")
 		p, err = plan.ForChangesets(deployed)
 	} else {
-		planValidation(nil)
+		validateOrExit(nil, "skima apply would not apply anything")
 		p, err = plan.ForState(viper.GetBool("state.transaction"))
 	}
 	if err != nil {
@@ -124,9 +124,9 @@ func deployedVersion(from string) (util.SemanticVersion, bool) {
 	return util.SemanticVersion{}, false
 }
 
-// planValidation validates what apply would validate - the state files and the given changesets - and exits if any
-// is invalid, since apply would stop there
-func planValidation(changesets []string) {
+// validateOrExit validates what apply would validate - the state files and the given changesets - and exits if any
+// is invalid. consequence says what that means, e.g. that apply would stop there
+func validateOrExit(changesets []string, consequence string) {
 	if skipValidation {
 		return
 	}
@@ -138,7 +138,7 @@ func planValidation(changesets []string) {
 	for _, r := range results {
 		if !r.Valid {
 			reportValidation(results, false, false)
-			fmt.Fprintln(os.Stderr, "ERROR: the manifest is invalid - skima apply would not apply anything. Fix the files above, or rerun with --skip-validation")
+			fmt.Fprintf(os.Stderr, "ERROR: the manifest is invalid - %s. Fix the files above, or rerun with --skip-validation\n", consequence)
 			os.Exit(1)
 		}
 	}
