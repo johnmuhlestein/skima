@@ -13,6 +13,7 @@
       "$ref": "table.schema.json#/$defs/nameList",
       "description": "The view's column names - must match the number of columns the sql selects"
     },
-    "sql": { "type": "string", "minLength": 1 }
+    "sql": { "type": "string", "minLength": 1 },
+    "comment": { "$ref": "table.schema.json#/$defs/comment" }
   }
 }

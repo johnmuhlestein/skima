@@ -4,8 +4,8 @@
     { "name": "id", "datatype": "uuid", "nullable": false },
     { "name": "project_id", "datatype": "uuid", "nullable": false },
     { "name": "file_location", "datatype": "text", "nullable": true },
-    { "name": "document_type", "datatype": "varchar", "nullable": false },
-    { "name": "priority", "datatype": "integer", "nullable": true, "default": "0" }
+    { "name": "document_type", "datatype": "varchar", "nullable": false, "comment": "STRUCTURED or UNSTRUCTURED - it's required" },
+    { "name": "priority", "datatype": "integer", "nullable": true, "default": "0", "comment": "Higher is processed sooner" }
   ],
   "primary-key": ["id"],
   "foreign-keys": [

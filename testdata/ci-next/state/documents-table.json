@@ -3,7 +3,7 @@
   "columns" : [
     { "name" : "id", "datatype" : "uuid", "nullable" : false },
     { "name" : "project_id", "datatype" : "uuid", "nullable" : false },
-    { "name" : "file_location", "datatype" : "text", "nullable" : true },
+    { "name" : "file_location", "datatype" : "text", "nullable" : true, "comment" : "Where the file is stored" },
     { "name" : "created_at", "datatype" : "timestamptz", "nullable" : false, "default" : "NOW()", "dfltfunc" : true }
   ],
   "primary-key" : ["id"],

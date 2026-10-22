@@ -27,7 +27,7 @@ func documents() Schema {
 	t.Triggers["documents_trg"] = "CREATE TRIGGER documents_trg BEFORE UPDATE ON documents FOR EACH ROW EXECUTE FUNCTION touch()"
 	tags := s.Table("tags")
 	tags.Columns["id"] = Column{Type: "integer", NotNull: true, Identity: "always"}
-	s.Views["document_types"] = " SELECT DISTINCT document_type\n   FROM documents;"
+	s.Views["document_types"] = View{Definition: " SELECT DISTINCT document_type\n   FROM documents;", Comment: "Distinct types"}
 	return s
 }
 
@@ -110,8 +110,8 @@ func TestDefinitions(t *testing.T) {
 	delete(docs.Indexes, "documents_type_idx")
 	docs.Indexes["documents_priority_idx"] = "CREATE INDEX documents_priority_idx ON documents USING btree (priority)"
 	docs.Triggers["documents_trg"] = "CREATE TRIGGER documents_trg AFTER UPDATE ON documents FOR EACH ROW EXECUTE FUNCTION touch()"
-	actual.Views["document_types"] = " SELECT document_type\n   FROM documents;"
-	actual.Views["old_report"] = " SELECT 1;"
+	actual.Views["document_types"] = View{Definition: " SELECT document_type\n   FROM documents;", Comment: "Distinct types"}
+	actual.Views["old_report"] = View{Definition: " SELECT 1;"}
 
 	expected := []string{
 		// grouped by table or view name - document_types sorts before documents
@@ -179,7 +179,7 @@ func TestRender(t *testing.T) {
 	docs.Columns["priority"] = Column{Type: "integer", Default: "5"}
 	delete(docs.Indexes, "documents_type_idx")
 	actual.Table("legacy_audit")
-	actual.Views["document_types"] = " SELECT document_type\n   FROM documents;"
+	actual.Views["document_types"] = View{Definition: " SELECT document_type\n   FROM documents;", Comment: "Distinct types"}
 	report := Report{Schema: "app1", Deployed: "1.0.3", Pending: []string{"1.0.4", "1.0.5"}, Findings: Compare(documents(), actual)}
 	if err := report.Ignore([]string{"legacy_*"}); err != nil {
 		t.Fatal(err)
@@ -202,5 +202,41 @@ func TestRender(t *testing.T) {
 	}
 	if !strings.Contains(string(out), `"findings":[]`) {
 		t.Errorf("EXPECTED an empty findings list in the JSON  ACTUAL: %s", out)
+	}
+}
+
+func TestComments(t *testing.T) {
+	expected := documents()
+	expected.Tables["documents"].Comment = "Uploaded documents"
+	title := expected.Tables["documents"].Columns["priority"]
+	title.Comment = "Higher is sooner"
+	expected.Tables["documents"].Columns["priority"] = title
+
+	actual := documents()
+	actual.Tables["tags"].Comment = "Added by hand"
+	view := actual.Views["document_types"]
+	view.Comment = "It's changed"
+	actual.Views["document_types"] = view
+
+	findings := Compare(expected, actual)
+	want := []string{
+		"changed view document_types comment",
+		"changed table documents comment",
+		"changed column documents.priority comment",
+		"changed table tags comment",
+	}
+	if got := describe(findings); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("EXPECTED %v\nACTUAL: %v", want, got)
+	}
+	checks := map[string][2]string{
+		"document_types":     {"Distinct types", "It's changed"},
+		"documents":          {"Uploaded documents", "none"},
+		"documents.priority": {"Higher is sooner", "none"},
+		"tags":               {"none", "Added by hand"},
+	}
+	for _, f := range findings {
+		if c := checks[f.Name]; f.Expected != c[0] || f.Actual != c[1] {
+			t.Errorf("%s: EXPECTED %q -> %q  ACTUAL: %q -> %q", f.Name, c[0], c[1], f.Expected, f.Actual)
+		}
 	}
 }

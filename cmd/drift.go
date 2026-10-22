@@ -26,8 +26,8 @@ var driftCmd = &cobra.Command{
   extra    the database has it, the state files do not define it
   changed  both have it, with different definitions - shown as expected and actual
 
-Tables, columns (type, nullability, default, identity, generated), primary key, unique, check and foreign key
-constraints, indexes, triggers and views are compared. Functions, grants and data are not.
+Tables, columns (type, nullability, default, identity, generated, comment), primary key, unique, check and foreign
+key constraints, indexes, triggers, views and table and view comments are compared. Functions, grants and data are not.
 
 Postgres rewrites definitions when it stores them (varchar is stored as character varying, and check constraints and
 views are reformatted), so drift does not compare the state files' text. It builds the state files into temporary

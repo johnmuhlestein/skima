@@ -17,6 +17,8 @@
       ],
       "bypass": ["23505"]
     },
-    { "object": "script", "description": "tidy up orphaned tags", "script": "cleanup_tags.sql" }
+    { "object": "script", "description": "tidy up orphaned tags", "script": "cleanup_tags.sql" },
+    { "object": "comment", "action": "add", "on": "column", "name": "document_type", "reference": "documents" },
+    { "object": "comment", "action": "drop", "on": "table", "name": "tags" }
   ]
 }

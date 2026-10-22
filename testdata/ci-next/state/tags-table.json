@@ -1,5 +1,6 @@
 {
   "name" : "tags",
+  "comment" : "Labels on documents",
   "columns" : [
     { "name" : "id", "datatype" : "integer", "nullable" : false, "primarykey" : true, "generate" : "always" },
     { "name" : "document_id", "datatype" : "uuid", "nullable" : false },

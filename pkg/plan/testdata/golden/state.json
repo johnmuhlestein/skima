@@ -58,6 +58,22 @@
           ]
         },
         {
+          "kind": "comment",
+          "describe": "column documents.document_type",
+          "source": "state/documents-table.json",
+          "sql": [
+            "comment on column documents.document_type is 'STRUCTURED or UNSTRUCTURED - it''s required'"
+          ]
+        },
+        {
+          "kind": "comment",
+          "describe": "column documents.priority",
+          "source": "state/documents-table.json",
+          "sql": [
+            "comment on column documents.priority is 'Higher is processed sooner'"
+          ]
+        },
+        {
           "kind": "table",
           "describe": "projects",
           "source": "state/projects-table.json",
@@ -82,6 +98,14 @@
           ],
           "tolerate": [
             "42710"
+          ]
+        },
+        {
+          "kind": "comment",
+          "describe": "table projects",
+          "source": "state/projects-table.json",
+          "sql": [
+            "comment on table projects is 'Projects that own documents'"
           ]
         },
         {
@@ -120,6 +144,15 @@
           "source": "state/project_documents-view.json",
           "sql": [
             "create or replace view project_documents (project_name,document_id,document_type) as select p.name, d.id, d.document_type from projects p join documents d on d.project_id = p.id"
+          ],
+          "retryable": true
+        },
+        {
+          "kind": "comment",
+          "describe": "view project_documents",
+          "source": "state/project_documents-view.json",
+          "sql": [
+            "comment on view project_documents is 'Documents per project'"
           ],
           "retryable": true
         },

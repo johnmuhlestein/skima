@@ -1,5 +1,6 @@
 {
   "name": "projects",
+  "comment": "Projects that own documents",
   "columns": [
     { "name": "id", "datatype": "uuid", "nullable": false },
     { "name": "name", "datatype": "text", "nullable": false },

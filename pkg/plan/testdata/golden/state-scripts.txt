@@ -1,4 +1,4 @@
-Plan for schema app1: not managed by skima yet - build version 1.0.3 from the state files (13 statements)
+Plan for schema app1: not managed by skima yet - build version 1.0.3 from the state files (17 statements)
 
 == state build 1.0.3  [transaction]
 -- sql update_last_modified_at.sql
@@ -17,12 +17,18 @@ create  index if not exists documents_type_idx on documents (document_type);
 alter table documents add constraint documents_file_location_unq unique (file_location);
 -- constraint documents.documents_document_type_check  (tolerates 42P07, 42710)
 alter table documents add constraint documents_document_type_check check (document_type in ('STRUCTURED','UNSTRUCTURED'));
+-- comment column documents.document_type
+comment on column documents.document_type is 'STRUCTURED or UNSTRUCTURED - it''s required';
+-- comment column documents.priority
+comment on column documents.priority is 'Higher is processed sooner';
 -- table projects
 create table if not exists projects (id uuid not null,name text not null,last_modified_at timestamptz not null default NOW() , constraint projects_pk primary key (id));
 -- index projects.projects_name_idx
 create unique index if not exists projects_name_idx on projects (name);
 -- trigger projects.projects_last_modified_trg  (tolerates 42710)
 create trigger projects_last_modified_trg before update on projects for each row execute function update_last_modified_at();
+-- comment table projects
+comment on table projects is 'Projects that own documents';
 -- table tags
 create table if not exists tags (id integer primary key generated always as identity,document_id uuid not null,label text not null);
 -- fk documents.documents_project_fk  (tolerates 42710)
@@ -31,6 +37,8 @@ alter table documents add constraint documents_project_fk foreign key (project_i
 alter table tags add constraint tags_document_fk foreign key (document_id) references documents (id);
 -- view project_documents  (retried if it depends on a view created after it)
 create or replace view project_documents (project_name,document_id,document_type) as select p.name, d.id, d.document_type from projects p join documents d on d.project_id = p.id;
+-- comment view project_documents  (retried if it depends on a view created after it)
+comment on view project_documents is 'Documents per project';
 -- sql seed_projects.sql
 --   state/sql/post/seed_projects.sql:
 insert into projects (id, name) values ('00000000-0000-0000-0000-000000000001', 'default') on conflict do nothing;

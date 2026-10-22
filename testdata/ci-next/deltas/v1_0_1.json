@@ -16,6 +16,8 @@
       ],
       "bypass" : ["23505"]
     },
-    { "object" : "script", "description" : "tag every document", "script" : "tag_documents.sql" }
+    { "object" : "script", "description" : "tag every document", "script" : "tag_documents.sql" },
+    { "object" : "comment", "action" : "add", "on" : "table", "name" : "projects" },
+    { "object" : "comment", "action" : "add", "on" : "column", "name" : "file_location", "reference" : "documents" }
   ]
 }

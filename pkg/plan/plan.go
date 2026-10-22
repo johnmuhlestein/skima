@@ -23,6 +23,7 @@ const (
 	KindConstraint = "constraint"
 	KindFk         = "fk"
 	KindView       = "view"
+	KindComment    = "comment"
 	KindDelta      = "delta"
 	KindScript     = "script" // a script delta - sql statements or a file in deltas/scripts
 	KindPreHook    = "pre-hook"
@@ -180,6 +181,12 @@ func ForState(transactional bool) (Plan, error) {
 		}
 		unit.Steps = append(unit.Steps, Step{Kind: KindView, Describe: view.Name, Source: relative(path), Sql: []string{view.GenerateDdl()}, Retryable: true,
 			Record: Record{Type: "Create View", Name: view.Name}})
+		if view.Comment != "" {
+			// retried with its view, which may not be created until a retry
+			comment := commentStep("view", view.Name, view.Comment, relative(path), 0)
+			comment.Retryable = true
+			unit.Steps = append(unit.Steps, comment)
+		}
 	}
 
 	post, err := sqlFileSteps("post", false)
@@ -319,6 +326,7 @@ func changesetUnit(path string) (Unit, []string, error) {
 			warnings = append(warnings, fmt.Sprintf("%s: %s", source, last.Note))
 			continue // apply does not run the post hook of a skipped delta
 		}
+		unit.Steps = append(unit.Steps, addedComments(delta, source, position)...)
 		if isHooked {
 			step, err := hookStep(KindPostHook, hooks.Hooks().Post, delta, source, position)
 			if err != nil {
@@ -367,7 +375,11 @@ func describe(delta manifest.Delta) string {
 		return delta.Describe()
 	}
 	action, object := statementType[1], statementType[2]
-	return fmt.Sprintf("%s %s %s", action, object, strings.TrimPrefix(delta.Describe(), action+" "))
+	rest := strings.TrimPrefix(delta.Describe(), action+" ")
+	if strings.HasPrefix(rest, object+" ") {
+		return action + " " + rest // e.g. a comment delta's "add comment on column docs.title"
+	}
+	return fmt.Sprintf("%s %s %s", action, object, rest)
 }
 
 // deltaTolerates returns the error codes apply treats as success for a delta's statement: an object that already
@@ -406,7 +418,44 @@ func hookStep(kind string, hook manifest.Hook, delta manifest.Delta, source stri
 	return &step, nil
 }
 
-// tableSteps creates the table with its indexes, triggers and constraints - its foreign keys are added separately
+// commentStep sets the comment on a table, column (target is table.column) or view
+func commentStep(on string, target string, comment string, source string, position int) Step {
+	describe := on + " " + target
+	return Step{Kind: KindComment, Describe: describe, Source: source, Delta: position, Sql: []string{manifest.CommentDdl(on, target, comment)},
+		Record: Record{Type: "Comment", Name: describe}}
+}
+
+// addedComments are the comments of a view or column a delta adds - a delta that adds an object creates it as its
+// state file describes, comment included. A table add's comments are part of its table steps
+func addedComments(delta manifest.Delta, source string, position int) []Step {
+	switch d := delta.(type) {
+	case manifest.SimpleDelta:
+		if d.Action != "add" {
+			return nil
+		}
+		switch d.Object {
+		case "view":
+			if view, err := manifest.ParseViewByName(d.Name); err == nil && view.Comment != "" {
+				return []Step{commentStep("view", d.Name, view.Comment, source, position)}
+			}
+		case "column":
+			if table, err := manifest.ParseTableByName(d.Reference); err == nil {
+				if col, ok := table.Column(d.Name); ok && col.Comment != "" {
+					return []Step{commentStep("column", d.Reference+"."+d.Name, col.Comment, source, position)}
+				}
+			}
+		}
+	case manifest.ColumnDelta:
+		// a column added from an explicit definition takes its comment from the definition
+		if d.Action == "add" && d.Definition.Name != "" && d.Definition.Comment != "" {
+			return []Step{commentStep("column", d.Reference+"."+d.Definition.Name, d.Definition.Comment, source, position)}
+		}
+	}
+	return nil
+}
+
+// tableSteps creates the table with its indexes, triggers, constraints and comments - its foreign keys are added
+// separately
 func tableSteps(table manifest.Table, source string, position int) []Step {
 	steps := []Step{{Kind: KindTable, Describe: table.Name, Source: source, Delta: position, Sql: []string{table.GenerateDdl()},
 		Record: Record{Type: "Create Table", Name: table.Name}}}
@@ -424,6 +473,14 @@ func tableSteps(table manifest.Table, source string, position int) []Step {
 		name := table.Name + "." + cons.Name
 		steps = append(steps, Step{Kind: KindConstraint, Describe: name, Source: source, Delta: position, Sql: []string{cons.GenerateDdl(table.Name)},
 			Tolerate: []string{codeDuplicateTable, codeDuplicateObject}, Record: Record{Type: "Add Constraint", Name: name}})
+	}
+	if table.Comment != "" {
+		steps = append(steps, commentStep("table", table.Name, table.Comment, source, position))
+	}
+	for _, col := range table.Columns {
+		if col.Comment != "" {
+			steps = append(steps, commentStep("column", table.Name+"."+col.Name, col.Comment, source, position))
+		}
 	}
 	return steps
 }

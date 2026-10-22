@@ -187,6 +187,15 @@ func TestViewRetries(t *testing.T) {
 		t.Errorf("EXPECTED the failed first attempt and 3 successes to be recorded  ACTUAL: %v", hist.rows)
 	}
 
+	// a view's comment is retried with its view
+	comment := plan.Step{Kind: plan.KindComment, Describe: "view first", Sql: []string{"comment first"}, Retryable: true,
+		Record: plan.Record{Type: "Comment", Name: "view first"}}
+	failures, ex, _, _ = execute([]plan.Step{viewStep("first"), comment, viewStep("second"), post},
+		map[string][]error{"first": {pgError("42P01")}, "comment first": {pgError("42P01")}})
+	if failures != 0 || strings.Join(ex.executed, ",") != "first,comment first,second,first,comment first,seed" {
+		t.Errorf("EXPECTED the comment retried after its view  ACTUAL: %d failures, executed %v", failures, ex.executed)
+	}
+
 	// a view that never resolves is retried until a pass makes no progress
 	missing := []error{pgError("42P01"), pgError("42P01"), pgError("42P01")}
 	failures, ex, _, _ = execute([]plan.Step{viewStep("orphan")}, map[string][]error{"orphan": missing})
@@ -229,10 +238,10 @@ func TestPlanHistoryRows(t *testing.T) {
 		}
 	}
 	expected := []string{
-		"Create Table", "delta add column", "Delta script hook", "delta add index", "Add FK", // 1.0.1
+		"Create Table", "delta add column", "Comment", "Delta script hook", "delta add index", "Add FK", // 1.0.1
 		"pre-hook sql [0]", "delta alter column", "delta add constraint", "delta rename column", "delta drop fk",
-		"delta sql [0]", "delta sql [1]", "delta script sql [0]", // 1.0.2
-		"delta sql [0]", "delta add function", "delta add view", // 1.0.3
+		"delta sql [0]", "delta sql [1]", "delta script sql [0]", "delta add comment", "delta drop comment", // 1.0.2
+		"delta sql [0]", "delta add function", "delta add view", "Comment", // 1.0.3
 	}
 	if strings.Join(types, "|") != strings.Join(expected, "|") {
 		t.Errorf("EXPECTED history rows\n  %v\nACTUAL:\n  %v", expected, types)

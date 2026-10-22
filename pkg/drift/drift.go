@@ -13,14 +13,20 @@ import (
 // Schema is the tables and views of a schema, as the postgres catalog describes them
 type Schema struct {
 	Tables map[string]*Table
-	// Views maps a view's name to its definition (pg_get_viewdef)
-	Views map[string]string
+	Views  map[string]View
+}
+
+// View is a view's definition (pg_get_viewdef) and comment
+type View struct {
+	Definition string
+	Comment    string
 }
 
 // Table is a table's columns and the objects defined on it. Constraints, indexes and triggers map a name to its
 // definition as postgres prints it, without the schema name. Indexes leave out those that back a primary key, unique
 // or exclusion constraint - they are compared as the constraint
 type Table struct {
+	Comment     string
 	Columns     map[string]Column
 	Constraints map[string]string
 	Indexes     map[string]string
@@ -37,11 +43,12 @@ type Column struct {
 	Identity string
 	// Generated is "stored" for a generated column, otherwise empty
 	Generated string
+	Comment   string
 }
 
 // NewSchema returns an empty schema
 func NewSchema() Schema {
-	return Schema{Tables: map[string]*Table{}, Views: map[string]string{}}
+	return Schema{Tables: map[string]*Table{}, Views: map[string]View{}}
 }
 
 // Table returns the named table, adding it when the schema does not have it yet
@@ -85,7 +92,8 @@ type Finding struct {
 	Object string `json:"object"` // table, column, constraint, index, trigger or view
 	// Name is the object's name - qualified by its table for columns, constraints, indexes and triggers
 	Name string `json:"name"`
-	// Attribute is the part of a changed column that differs: type, nullable, default, identity or generated
+	// Attribute is the part of a changed object that differs: a column's type, nullable, default, identity or
+	// generated, or the comment of a table, column or view
 	Attribute string `json:"attribute,omitempty"`
 	Expected  string `json:"expected,omitempty"`
 	Actual    string `json:"actual,omitempty"`
@@ -110,6 +118,9 @@ func Compare(expected Schema, actual Schema) []Finding {
 			findings = append(findings, Finding{Change: Missing, Object: "table", Name: name})
 			continue
 		}
+		if exp.Comment != act.Comment {
+			findings = append(findings, commentFinding("table", name, exp.Comment, act.Comment))
+		}
 		findings = append(findings, compareColumns(name, exp.Columns, act.Columns)...)
 		findings = append(findings, compareDefinitions("constraint", name, exp.Constraints, act.Constraints)...)
 		findings = append(findings, compareDefinitions("index", name, exp.Indexes, act.Indexes)...)
@@ -120,7 +131,7 @@ func Compare(expected Schema, actual Schema) []Finding {
 			findings = append(findings, Finding{Change: Extra, Object: "table", Name: name})
 		}
 	}
-	findings = append(findings, compareDefinitions("view", "", expected.Views, actual.Views)...)
+	findings = append(findings, compareViews(expected.Views, actual.Views)...)
 
 	objectOrder := map[string]int{"table": 0, "view": 0, "column": 1, "constraint": 2, "index": 3, "trigger": 4}
 	sort.Slice(findings, func(i, j int) bool {
@@ -158,6 +169,7 @@ func compareColumns(table string, expected map[string]Column, actual map[string]
 		changed("default", orNone(exp.Default), orNone(act.Default))
 		changed("identity", orNone(exp.Identity), orNone(act.Identity))
 		changed("generated", orNone(exp.Generated), orNone(act.Generated))
+		changed("comment", orNone(exp.Comment), orNone(act.Comment))
 	}
 	for name, act := range actual {
 		if _, ok := expected[name]; !ok {
@@ -192,6 +204,27 @@ func compareDefinitions(object string, table string, expected map[string]string,
 		}
 	}
 	return findings
+}
+
+func compareViews(expected map[string]View, actual map[string]View) []Finding {
+	definitions := func(views map[string]View) map[string]string {
+		defs := map[string]string{}
+		for name, view := range views {
+			defs[name] = view.Definition
+		}
+		return defs
+	}
+	findings := compareDefinitions("view", "", definitions(expected), definitions(actual))
+	for name, exp := range expected {
+		if act, ok := actual[name]; ok && exp.Comment != act.Comment {
+			findings = append(findings, commentFinding("view", name, exp.Comment, act.Comment))
+		}
+	}
+	return findings
+}
+
+func commentFinding(object string, name string, expected string, actual string) Finding {
+	return Finding{Change: Changed, Object: object, Name: name, Attribute: "comment", Expected: orNone(expected), Actual: orNone(actual)}
 }
 
 func nullability(notNull bool) string {
