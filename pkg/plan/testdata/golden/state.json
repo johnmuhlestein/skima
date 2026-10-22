@@ -1,0 +1,138 @@
+{
+  "schema": "app1",
+  "from": "",
+  "to": "1.0.3",
+  "units": [
+    {
+      "kind": "state",
+      "version": "1.0.3",
+      "transactional": true,
+      "steps": [
+        {
+          "kind": "sql",
+          "describe": "update_last_modified_at.sql",
+          "source": "state/sql/pre/update_last_modified_at.sql",
+          "script": "state/sql/pre/update_last_modified_at.sql",
+          "sql": [
+            "create or replace function update_last_modified_at() returns trigger language plpgsql as $$\nbegin\n  new.last_modified_at = now();\n  return new;\nend;\n$$;\n"
+          ]
+        },
+        {
+          "kind": "table",
+          "describe": "documents",
+          "source": "state/documents-table.json",
+          "sql": [
+            "create table if not exists documents (id uuid not null,project_id uuid not null,file_location text,document_type varchar not null,priority integer default 0 , constraint documents_pk primary key (id)) "
+          ]
+        },
+        {
+          "kind": "index",
+          "describe": "documents.documents_type_idx",
+          "source": "state/documents-table.json",
+          "sql": [
+            "create  index if not exists documents_type_idx on documents (document_type)"
+          ]
+        },
+        {
+          "kind": "constraint",
+          "describe": "documents.documents_file_location_unq",
+          "source": "state/documents-table.json",
+          "sql": [
+            "alter table documents add constraint documents_file_location_unq unique (file_location)"
+          ],
+          "tolerate": [
+            "42P07",
+            "42710"
+          ]
+        },
+        {
+          "kind": "constraint",
+          "describe": "documents.documents_document_type_check",
+          "source": "state/documents-table.json",
+          "sql": [
+            "alter table documents add constraint documents_document_type_check check (document_type in ('STRUCTURED','UNSTRUCTURED'))"
+          ],
+          "tolerate": [
+            "42P07",
+            "42710"
+          ]
+        },
+        {
+          "kind": "table",
+          "describe": "projects",
+          "source": "state/projects-table.json",
+          "sql": [
+            "create table if not exists projects (id uuid not null,name text not null,last_modified_at timestamptz not null default NOW() , constraint projects_pk primary key (id)) "
+          ]
+        },
+        {
+          "kind": "index",
+          "describe": "projects.projects_name_idx",
+          "source": "state/projects-table.json",
+          "sql": [
+            "create unique index if not exists projects_name_idx on projects (name)"
+          ]
+        },
+        {
+          "kind": "trigger",
+          "describe": "projects.projects_last_modified_trg",
+          "source": "state/projects-table.json",
+          "sql": [
+            "create trigger projects_last_modified_trg before update on projects for each row execute function update_last_modified_at()"
+          ],
+          "tolerate": [
+            "42710"
+          ]
+        },
+        {
+          "kind": "table",
+          "describe": "tags",
+          "source": "state/tags-table.json",
+          "sql": [
+            "create table if not exists tags (id integer primary key generated always as identity,document_id uuid not null,label text not null) "
+          ]
+        },
+        {
+          "kind": "fk",
+          "describe": "documents.documents_project_fk",
+          "source": "state/documents-table.json",
+          "sql": [
+            "alter table documents add constraint documents_project_fk foreign key (project_id) references projects (id) on delete cascade"
+          ],
+          "tolerate": [
+            "42710"
+          ]
+        },
+        {
+          "kind": "fk",
+          "describe": "tags.tags_document_fk",
+          "source": "state/tags-table.json",
+          "sql": [
+            "alter table tags add constraint tags_document_fk foreign key (document_id) references documents (id)"
+          ],
+          "tolerate": [
+            "42710"
+          ]
+        },
+        {
+          "kind": "view",
+          "describe": "project_documents",
+          "source": "state/project_documents-view.json",
+          "sql": [
+            "create or replace view project_documents (project_name,document_id,document_type) as select p.name, d.id, d.document_type from projects p join documents d on d.project_id = p.id"
+          ],
+          "retryable": true
+        },
+        {
+          "kind": "sql",
+          "describe": "seed_projects.sql",
+          "source": "state/sql/post/seed_projects.sql",
+          "script": "state/sql/post/seed_projects.sql",
+          "sql": [
+            "insert into projects (id, name) values ('00000000-0000-0000-0000-000000000001', 'default') on conflict do nothing;\n"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -90,8 +90,19 @@ jobs:
           SKM_DBCONN_SUPERUSER: postgres
           SKM_DBCONN_SUPERUSERPWD: postgres
 
+      - name: Plan shows the state build
+        run: |
+          ./skima plan --from none
+          # reads the database, which skima does not manage yet - 2 means changes are pending
+          status=0
+          ./skima plan --detailed-exitcode > /dev/null || status=$?
+          [ "$status" -eq 2 ]
+
       - name: Apply state
         run: ./skima apply
+
+      - name: Plan has nothing left to apply
+        run: ./skima plan --detailed-exitcode
 
       - name: Re-apply is a no-op
         run: ./skima apply

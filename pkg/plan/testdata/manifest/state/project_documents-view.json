@@ -1,0 +1,5 @@
+{
+  "name": "project_documents",
+  "columns": ["project_name", "document_id", "document_type"],
+  "sql": "select p.name, d.id, d.document_type from projects p join documents d on d.project_id = p.id"
+}

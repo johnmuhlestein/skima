@@ -1,0 +1,225 @@
+{
+  "schema": "app1",
+  "from": "1.0.0",
+  "to": "1.0.3",
+  "units": [
+    {
+      "kind": "changeset",
+      "version": "1.0.1",
+      "file": "deltas/v1_0_1.json",
+      "description": "tag documents and track their priority",
+      "transactional": true,
+      "steps": [
+        {
+          "kind": "table",
+          "describe": "tags",
+          "source": "deltas/v1_0_1.json#/deltas/0",
+          "delta": 1,
+          "sql": [
+            "create table if not exists tags (id integer primary key generated always as identity,document_id uuid not null,label text not null) "
+          ]
+        },
+        {
+          "kind": "delta",
+          "describe": "add column documents.priority",
+          "source": "deltas/v1_0_1.json#/deltas/1",
+          "delta": 2,
+          "sql": [
+            "alter table documents add column if not exists priority integer default 0"
+          ],
+          "tolerate": [
+            "42P07",
+            "42710",
+            "42P01"
+          ]
+        },
+        {
+          "kind": "post-hook",
+          "describe": "add column documents.priority",
+          "source": "deltas/v1_0_1.json#/deltas/1",
+          "delta": 2,
+          "script": "deltas/scripts/backfill_priority.sql",
+          "sql": [
+            "update documents set priority = 1 where document_type = 'STRUCTURED';\nupdate documents set priority = 0 where priority is null;\n"
+          ]
+        },
+        {
+          "kind": "delta",
+          "describe": "add index documents.documents_type_idx",
+          "source": "deltas/v1_0_1.json#/deltas/2",
+          "delta": 3,
+          "sql": [
+            "create  index if not exists documents_type_idx on documents (document_type)"
+          ],
+          "tolerate": [
+            "42P07",
+            "42710",
+            "42P01"
+          ]
+        },
+        {
+          "kind": "fk",
+          "describe": "tags.tags_document_fk",
+          "source": "deltas/v1_0_1.json#/deltas/0",
+          "delta": 1,
+          "sql": [
+            "alter table tags add constraint tags_document_fk foreign key (document_id) references documents (id)"
+          ],
+          "tolerate": [
+            "42710"
+          ],
+          "deferred": true
+        }
+      ]
+    },
+    {
+      "kind": "changeset",
+      "version": "1.0.2",
+      "file": "deltas/v1_0_2.json",
+      "description": "require a document type",
+      "transactional": true,
+      "steps": [
+        {
+          "kind": "pre-hook",
+          "describe": "alter column documents.document_type",
+          "source": "deltas/v1_0_2.json#/deltas/0",
+          "delta": 1,
+          "sql": [
+            "update documents set document_type = 'UNSTRUCTURED' where document_type is null"
+          ]
+        },
+        {
+          "kind": "delta",
+          "describe": "alter column documents.document_type",
+          "source": "deltas/v1_0_2.json#/deltas/0",
+          "delta": 1,
+          "sql": [
+            "alter table documents alter column document_type set NOT NULL"
+          ],
+          "tolerate": [
+            "42P07",
+            "42710",
+            "42P01"
+          ]
+        },
+        {
+          "kind": "delta",
+          "describe": "add constraint documents.documents_document_type_check",
+          "source": "deltas/v1_0_2.json#/deltas/1",
+          "delta": 2,
+          "sql": [
+            "alter table documents add constraint documents_document_type_check check (document_type in ('STRUCTURED','UNSTRUCTURED'))"
+          ],
+          "tolerate": [
+            "42P07",
+            "42710",
+            "42P01"
+          ]
+        },
+        {
+          "kind": "delta",
+          "describe": "rename column documents.location",
+          "source": "deltas/v1_0_2.json#/deltas/2",
+          "delta": 3,
+          "sql": [
+            "alter table documents rename column location to file_location"
+          ],
+          "tolerate": [
+            "42P07",
+            "42710",
+            "42P01",
+            "42703"
+          ]
+        },
+        {
+          "kind": "delta",
+          "describe": "drop fk documents.documents_old_fk",
+          "source": "deltas/v1_0_2.json#/deltas/3",
+          "delta": 4,
+          "sql": [
+            "alter table documents drop constraint documents_old_fk"
+          ],
+          "tolerate": [
+            "42P07",
+            "42710",
+            "42P01",
+            "42704"
+          ]
+        },
+        {
+          "kind": "script",
+          "describe": "seed the default tags",
+          "source": "deltas/v1_0_2.json#/deltas/4",
+          "delta": 5,
+          "sql": [
+            "insert into tags (document_id, label) select id, 'new' from documents",
+            "delete from tags where label = 'obsolete'"
+          ],
+          "tolerate": [
+            "23505"
+          ]
+        },
+        {
+          "kind": "script",
+          "describe": "tidy up orphaned tags",
+          "source": "deltas/v1_0_2.json#/deltas/5",
+          "delta": 6,
+          "script": "deltas/scripts/cleanup_tags.sql",
+          "sql": [
+            "delete from tags t where not exists (select 1 from documents d where d.id = t.document_id);\n"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "changeset",
+      "version": "1.0.3",
+      "file": "deltas/v1_0_3.json",
+      "description": "index without locking and refresh the view",
+      "transactional": false,
+      "steps": [
+        {
+          "kind": "script",
+          "describe": "concurrent label index",
+          "source": "deltas/v1_0_3.json#/deltas/0",
+          "delta": 1,
+          "sql": [
+            "create index concurrently if not exists tags_label_idx on tags (label)"
+          ]
+        },
+        {
+          "kind": "delta",
+          "describe": "add function update_last_modified_at",
+          "source": "deltas/v1_0_3.json#/deltas/1",
+          "delta": 2,
+          "script": "state/sql/pre/update_last_modified_at.sql",
+          "sql": [
+            "create or replace function update_last_modified_at() returns trigger language plpgsql as $$\nbegin\n  new.last_modified_at = now();\n  return new;\nend;\n$$;\n"
+          ],
+          "tolerate": [
+            "42P07",
+            "42710",
+            "42P01"
+          ]
+        },
+        {
+          "kind": "delta",
+          "describe": "add view project_documents",
+          "source": "deltas/v1_0_3.json#/deltas/2",
+          "delta": 3,
+          "sql": [
+            "create or replace view project_documents (project_name,document_id,document_type) as select p.name, d.id, d.document_type from projects p join documents d on d.project_id = p.id"
+          ],
+          "tolerate": [
+            "42P07",
+            "42710",
+            "42P01"
+          ]
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    "changeset 1.0.3 runs without a transaction - a failure part way through leaves the earlier deltas in place"
+  ]
+}

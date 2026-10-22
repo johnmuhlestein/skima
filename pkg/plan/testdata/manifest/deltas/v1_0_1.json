@@ -1,0 +1,11 @@
+{
+  "description": "tag documents and track their priority",
+  "deltas": [
+    { "object": "table", "action": "add", "name": "tags" },
+    {
+      "object": "column", "action": "add", "name": "priority", "reference": "documents",
+      "post": { "script": "backfill_priority.sql" }
+    },
+    { "object": "index", "action": "add", "name": "documents_type_idx", "reference": "documents" }
+  ]
+}
