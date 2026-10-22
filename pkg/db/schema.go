@@ -20,8 +20,8 @@ type querier interface {
 
 // ReadSchemas reads the configured schema as it is in the database (actual) and as the state build describes it
 // (expected). The expected schema comes from building the unit's steps into the session's temporary schema, in a
-// transaction that is always rolled back - with pg_temp first on the search path, the state build's tables, indexes,
-// constraints, triggers and views are created as temporary objects, and postgres normalizes their definitions exactly
+// transaction that is always rolled back - with pg_temp first on the search path, the state build's enums, tables,
+// indexes, constraints, triggers and views are created as temporary objects, and postgres normalizes their definitions exactly
 // as it did the real ones. Pass the state build without its post sql files, which load data. It only needs the TEMP
 // privilege, takes no apply lock and changes nothing
 func ReadSchemas(stateBuild plan.Unit) (actual drift.Schema, expected drift.Schema, err error) {
@@ -108,6 +108,11 @@ const triggersQuery = `select c.relname, t.tgname, pg_get_triggerdef(t.oid)
 	from pg_trigger t join pg_class c on c.oid = t.tgrelid
 	where c.relnamespace = $1 and not t.tgisinternal and ` + notHistoryTable
 
+const enumsQuery = `select t.typname, array_agg(e.enumlabel order by e.enumsortorder), coalesce(obj_description(t.oid, 'pg_type'), '')
+	from pg_type t join pg_enum e on e.enumtypid = t.oid
+	where t.typnamespace = $1
+	group by t.oid, t.typname`
+
 const viewsQuery = `select c.relname, pg_get_viewdef(c.oid), coalesce(obj_description(c.oid, 'pg_class'), '') from pg_class c where c.relnamespace = $1 and c.relkind = 'v'`
 
 // readSchema reads the tables and views in the namespace. prefix is the schema name as postgres prints it in index and
@@ -150,6 +155,13 @@ func readSchema(ctx context.Context, q querier, namespace uint32, prefix string)
 			var table, name, def string
 			err := rows.Scan(&table, &name, &def)
 			s.Table(table).Triggers[name] = unqualify(def)
+			return err
+		}},
+		{enumsQuery, func(rows pgx.Rows) error {
+			var name string
+			var enum drift.Enum
+			err := rows.Scan(&name, &enum.Values, &enum.Comment)
+			s.Enums[name] = enum
 			return err
 		}},
 		{viewsQuery, func(rows pgx.Rows) error {

@@ -14,6 +14,13 @@ import (
 type Schema struct {
 	Tables map[string]*Table
 	Views  map[string]View
+	Enums  map[string]Enum
+}
+
+// Enum is an enum type's values, in sort order, and comment
+type Enum struct {
+	Values  []string
+	Comment string
 }
 
 // View is a view's definition (pg_get_viewdef) and comment
@@ -48,7 +55,7 @@ type Column struct {
 
 // NewSchema returns an empty schema
 func NewSchema() Schema {
-	return Schema{Tables: map[string]*Table{}, Views: map[string]View{}}
+	return Schema{Tables: map[string]*Table{}, Views: map[string]View{}, Enums: map[string]Enum{}}
 }
 
 // Table returns the named table, adding it when the schema does not have it yet
@@ -89,19 +96,19 @@ const (
 // Finding is one difference between the schema in the database and the schema its state files describe
 type Finding struct {
 	Change string `json:"change"` // missing, extra or changed
-	Object string `json:"object"` // table, column, constraint, index, trigger or view
+	Object string `json:"object"` // table, column, constraint, index, trigger, view or enum
 	// Name is the object's name - qualified by its table for columns, constraints, indexes and triggers
 	Name string `json:"name"`
 	// Attribute is the part of a changed object that differs: a column's type, nullable, default, identity or
-	// generated, or the comment of a table, column or view
+	// generated, or the comment of a table, column, view or enum
 	Attribute string `json:"attribute,omitempty"`
 	Expected  string `json:"expected,omitempty"`
 	Actual    string `json:"actual,omitempty"`
 }
 
-// table is the table a finding belongs to - its name, for a table or view
+// table is the table a finding belongs to - its name, for a table, view or enum
 func (f Finding) table() string {
-	if f.Object == "table" || f.Object == "view" {
+	if f.Object == "table" || f.Object == "view" || f.Object == "enum" {
 		return f.Name
 	}
 	table, _, _ := strings.Cut(f.Name, ".")
@@ -132,8 +139,9 @@ func Compare(expected Schema, actual Schema) []Finding {
 		}
 	}
 	findings = append(findings, compareViews(expected.Views, actual.Views)...)
+	findings = append(findings, compareEnums(expected.Enums, actual.Enums)...)
 
-	objectOrder := map[string]int{"table": 0, "view": 0, "column": 1, "constraint": 2, "index": 3, "trigger": 4}
+	objectOrder := map[string]int{"table": 0, "view": 0, "enum": 0, "column": 1, "constraint": 2, "index": 3, "trigger": 4}
 	sort.Slice(findings, func(i, j int) bool {
 		a, b := findings[i], findings[j]
 		if a.table() != b.table() {
@@ -218,6 +226,25 @@ func compareViews(expected map[string]View, actual map[string]View) []Finding {
 	for name, exp := range expected {
 		if act, ok := actual[name]; ok && exp.Comment != act.Comment {
 			findings = append(findings, commentFinding("view", name, exp.Comment, act.Comment))
+		}
+	}
+	return findings
+}
+
+// compareEnums compares enum types by their values in order - postgres sorts an enum by the order its values were
+// added, so a value in the wrong position is a difference too
+func compareEnums(expected map[string]Enum, actual map[string]Enum) []Finding {
+	values := func(enums map[string]Enum) map[string]string {
+		described := map[string]string{}
+		for name, enum := range enums {
+			described[name] = strings.Join(enum.Values, ", ")
+		}
+		return described
+	}
+	findings := compareDefinitions("enum", "", values(expected), values(actual))
+	for name, exp := range expected {
+		if act, ok := actual[name]; ok && exp.Comment != act.Comment {
+			findings = append(findings, commentFinding("enum", name, exp.Comment, act.Comment))
 		}
 	}
 	return findings

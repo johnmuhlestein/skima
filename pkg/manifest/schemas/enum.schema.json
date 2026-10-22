@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/johnmuhlestein/skima/main/pkg/manifest/schemas/enum.schema.json",
+  "title": "skima enum type definition",
+  "description": "An enum type state file (state/<name>-enum.json)",
+  "type": "object",
+  "required": ["name", "values"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "name": { "$ref": "table.schema.json#/$defs/name" },
+    "values": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 63 },
+      "description": "The values in sort order - postgres can add a value to an enum but cannot remove or reorder one"
+    },
+    "comment": { "$ref": "table.schema.json#/$defs/comment" }
+  }
+}

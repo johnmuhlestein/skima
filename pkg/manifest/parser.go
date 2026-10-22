@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"skima/pkg/util"
+	"slices"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -125,6 +126,13 @@ type View struct {
 	Comment string
 }
 
+// Enum is an enum type - its values in sort order
+type Enum struct {
+	Name    string
+	Values  []string
+	Comment string
+}
+
 type Hook struct {
 	Sql    []string
 	Script string
@@ -149,8 +157,10 @@ type SimpleDelta struct {
 	Name      string
 	Reference string
 	NewName   string
-	// On is what a comment delta comments on: table, column or view
+	// On is what a comment delta comments on: table, column, view or enum
 	On string
+	// Value is the value an enum alter delta adds
+	Value string
 	PrePostHook
 }
 
@@ -307,6 +317,47 @@ func ParseTableByPath(path string) (Table, error) {
 		return parseTable(entityBytes)
 	}
 	return Table{}, err
+}
+
+func ParseEnumByName(name string) (Enum, error) {
+	path := filepath.Join(viper.GetString("workdir"), "state", fmt.Sprintf("%s-enum.json", name))
+	return ParseEnumByPath(path)
+}
+
+func ParseEnumByPath(path string) (Enum, error) {
+	entityBytes, err := reader.readFile(path)
+	if err != nil {
+		return Enum{}, err
+	}
+	enum := Enum{}
+	err = json.Unmarshal(entityBytes, &enum)
+	return enum, err
+}
+
+// GenerateDdl creates the enum type with its values
+func (e Enum) GenerateDdl() string {
+	values := make([]string, len(e.Values))
+	for i, value := range e.Values {
+		values[i] = QuoteLiteral(value)
+	}
+	return fmt.Sprintf("create type %s as enum (%s)", e.Name, strings.Join(values, ", "))
+}
+
+// AddValueDdl adds the value to the type in the position the enum gives it - after the value before it, or before the
+// value after it when it is first. The value must be one of the enum's values
+func (e Enum) AddValueDdl(value string) (string, bool) {
+	position := slices.Index(e.Values, value)
+	if position < 0 {
+		return "", false
+	}
+	ddl := fmt.Sprintf("alter type %s add value if not exists %s", e.Name, QuoteLiteral(value))
+	switch {
+	case position > 0:
+		ddl += " after " + QuoteLiteral(e.Values[position-1])
+	case len(e.Values) > 1:
+		ddl += " before " + QuoteLiteral(e.Values[1])
+	}
+	return ddl, true
 }
 
 func ParseViewByName(name string) (View, error) {
@@ -664,6 +715,23 @@ func (sd SimpleDelta) Ddl() (string, error) {
 				return "", missingDefinition("Table %s did not have a index definition matching %s", sd.Reference, sd.Name)
 			}
 		}
+	case "enum":
+		switch sd.Action {
+		case "drop":
+			return fmt.Sprintf("drop type if exists %s", sd.Name), nil
+		case "add", "alter":
+			e, err := ParseEnumByName(sd.Name)
+			if err != nil {
+				return "", fmt.Errorf("Unable to parse the enum %s: %w", sd.Name, err)
+			}
+			if sd.Action == "add" {
+				return e.GenerateDdl(), nil
+			}
+			if ddl, ok := e.AddValueDdl(sd.Value); ok {
+				return ddl, nil
+			}
+			return "", missingDefinition("Enum %s did not have a value matching %s", sd.Name, sd.Value)
+		}
 	case "comment":
 		if sd.Action == "drop" {
 			return CommentDdl(sd.On, sd.commentTarget(), ""), nil
@@ -729,8 +797,14 @@ func (sd SimpleDelta) stateComment() (string, error) {
 			return "", fmt.Errorf("Unable to parse the view %s: %w", sd.Name, err)
 		}
 		comment = v.Comment
+	case "enum":
+		e, err := ParseEnumByName(sd.Name)
+		if err != nil {
+			return "", fmt.Errorf("Unable to parse the enum %s: %w", sd.Name, err)
+		}
+		comment = e.Comment
 	default:
-		return "", missingDefinition("cannot comment on %q - use table, column or view", sd.On)
+		return "", missingDefinition("cannot comment on %q - use table, column, view or enum", sd.On)
 	}
 	if comment == "" {
 		return "", missingDefinition("%s %s has no comment in its state file", sd.On, sd.commentTarget())
@@ -748,12 +822,15 @@ func (t Table) Column(name string) (Column, bool) {
 	return Column{}, false
 }
 
-// CommentDdl sets the comment on a table, column (target is table.column) or view - an empty comment removes it. The
-// comment is quoted as a string literal
+// CommentDdl sets the comment on a table, column (target is table.column), view or enum - an empty comment removes it.
+// The comment is quoted as a string literal
 func CommentDdl(on string, target string, comment string) string {
 	literal := "null"
 	if comment != "" {
 		literal = QuoteLiteral(comment)
+	}
+	if on == "enum" {
+		on = "type" // an enum is a type to postgres
 	}
 	return fmt.Sprintf("comment on %s %s is %s", on, target, literal)
 }
@@ -803,6 +880,10 @@ func (sd SimpleDelta) Describe() string {
 	bld.WriteString(" ")
 	if sd.Object == "comment" {
 		fmt.Fprintf(&bld, "comment on %s ", sd.On)
+	}
+	if sd.Object == "enum" && sd.Action == "alter" {
+		fmt.Fprintf(&bld, "%s (add value %s)", sd.Name, QuoteLiteral(sd.Value))
+		return bld.String()
 	}
 	if len(sd.Reference) > 0 {
 		bld.WriteString(sd.Reference)

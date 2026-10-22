@@ -18,6 +18,7 @@ type stateIndex struct {
 	tables     map[string]Table
 	tableFiles map[string]string
 	views      map[string]View
+	enums      map[string]Enum
 }
 
 func stateName(path string, suffix string) string {
@@ -26,7 +27,7 @@ func stateName(path string, suffix string) string {
 
 // indexState parses the state files that passed schema validation
 func indexState(stateResults []*FileValidation) stateIndex {
-	index := stateIndex{tables: map[string]Table{}, tableFiles: map[string]string{}, views: map[string]View{}}
+	index := stateIndex{tables: map[string]Table{}, tableFiles: map[string]string{}, views: map[string]View{}, enums: map[string]Enum{}}
 	for _, result := range stateResults {
 		if !result.Valid {
 			continue
@@ -41,6 +42,10 @@ func indexState(stateResults []*FileValidation) stateIndex {
 		case KindView:
 			if view, err := ParseViewByPath(result.File); err == nil {
 				index.views[stateName(result.File, "-view.json")] = view
+			}
+		case KindEnum:
+			if enum, err := ParseEnumByPath(result.File); err == nil {
+				index.enums[stateName(result.File, "-enum.json")] = enum
 			}
 		}
 	}
@@ -70,6 +75,10 @@ func checkStateReferences(result *FileValidation, index stateIndex) {
 		return
 	}
 	switch result.Kind {
+	case KindEnum:
+		if enum, ok := index.enums[stateName(result.File, "-enum.json")]; ok && enum.Name != stateName(result.File, "-enum.json") {
+			result.addIssue(SeverityError, "/name", "name '%s' does not match the file name - deltas load this file as enum '%s'", enum.Name, stateName(result.File, "-enum.json"))
+		}
 	case KindView:
 		if view, err := ParseViewByPath(result.File); err == nil && view.Name != stateName(result.File, "-view.json") {
 			result.addIssue(SeverityError, "/name", "name '%s' does not match the file name - deltas load this file as view '%s'", view.Name, stateName(result.File, "-view.json"))
@@ -166,14 +175,15 @@ func checkChangesetReferences(result *FileValidation, index stateIndex, workdir 
 				}
 			}
 		case SimpleDelta:
-			if d.Action != "add" {
-				continue // drop and rename do not read state
+			if d.Action != "add" && !(d.Object == "enum" && d.Action == "alter") {
+				continue // drop and rename do not read state - an enum alter reads the value's position
 			}
 			checkSimpleAdd(result, index, workdir, d, location, severity)
 		}
 	}
 }
 
+// checkSimpleAdd checks a delta that reads its definition from the state files - an add, or an enum alter
 func checkSimpleAdd(result *FileValidation, index stateIndex, workdir string, d SimpleDelta, location string, severity string) {
 	switch d.Object {
 	case "table":
@@ -193,6 +203,13 @@ func checkSimpleAdd(result *FileValidation, index stateIndex, workdir string, d 
 		result.addIssue(severity, location+"/name", "function '%s' has no sql file - expected %s", d.Name, strings.Join(FunctionFilePaths("", d.Name), " or "))
 	case "comment":
 		checkCommentAdd(result, index, d, location, severity)
+	case "enum":
+		enum, ok := index.enums[d.Name]
+		if !ok {
+			result.addIssue(severity, location+"/name", "enum '%s' has no valid state file (state/%s-enum.json)", d.Name, d.Name)
+		} else if d.Action == "alter" && !slices.Contains(enum.Values, d.Value) {
+			result.addIssue(severity, location+"/value", "enum '%s' has no value '%s' in state/%s-enum.json - add it there, in the position it should have", d.Name, d.Value, d.Name)
+		}
 	case "column", "index", "trigger", "fk", "constraint", "pk":
 		table, ok := requireTable(result, index, d.Reference, location, severity)
 		if !ok {
@@ -253,6 +270,13 @@ func checkCommentAdd(result *FileValidation, index stateIndex, d SimpleDelta, lo
 			return
 		}
 		comment, file = view.Comment, filepath.Join("state", d.Name+"-view.json")
+	case "enum":
+		enum, ok := index.enums[d.Name]
+		if !ok {
+			result.addIssue(severity, location+"/name", "enum '%s' has no valid state file (state/%s-enum.json)", d.Name, d.Name)
+			return
+		}
+		comment, file = enum.Comment, filepath.Join("state", d.Name+"-enum.json")
 	}
 	if comment == "" {
 		result.addIssue(severity, location+"/name", "%s '%s' has no comment in %s - add one, or drop the comment instead", d.On, d.commentTarget(), file)

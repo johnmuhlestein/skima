@@ -24,6 +24,7 @@ const (
 	KindFk         = "fk"
 	KindView       = "view"
 	KindComment    = "comment"
+	KindEnum       = "enum"
 	KindDelta      = "delta"
 	KindScript     = "script" // a script delta - sql statements or a file in deltas/scripts
 	KindPreHook    = "pre-hook"
@@ -153,6 +154,23 @@ func ForState(transactional bool) (Plan, error) {
 		return Plan{}, err
 	}
 	unit.Steps = append(unit.Steps, pre...)
+
+	// enums come before the tables whose columns use them
+	enumPaths, err := filepath.Glob(filepath.Join(workdir, "state", "*-enum.json"))
+	if err != nil {
+		return Plan{}, err
+	}
+	for _, path := range enumPaths {
+		enum, err := manifest.ParseEnumByPath(path)
+		if err != nil {
+			return Plan{}, fmt.Errorf("unable to parse %s: %w", relative(path), err)
+		}
+		unit.Steps = append(unit.Steps, Step{Kind: KindEnum, Describe: enum.Name, Source: relative(path), Sql: []string{enum.GenerateDdl()},
+			Tolerate: []string{codeDuplicateObject}, Record: Record{Type: "Create Type", Name: enum.Name}})
+		if enum.Comment != "" {
+			unit.Steps = append(unit.Steps, commentStep("enum", enum.Name, enum.Comment, relative(path), 0))
+		}
+	}
 
 	tablePaths, err := filepath.Glob(filepath.Join(workdir, "state", "*-table.json"))
 	if err != nil {
@@ -327,6 +345,9 @@ func changesetUnit(path string) (Unit, []string, error) {
 			continue // apply does not run the post hook of a skipped delta
 		}
 		unit.Steps = append(unit.Steps, addedComments(delta, source, position)...)
+		if d, ok := delta.(manifest.SimpleDelta); ok && d.Object == "enum" && d.Action == "alter" && unit.Transactional {
+			warnings = append(warnings, fmt.Sprintf("%s: changeset %s adds the value '%s' to enum %s in a transaction - postgres does not let the value be used until the changeset commits, so use it in a later changeset", source, cs.Version, d.Value, d.Name))
+		}
 		if isHooked {
 			step, err := hookStep(KindPostHook, hooks.Hooks().Post, delta, source, position)
 			if err != nil {
@@ -418,14 +439,14 @@ func hookStep(kind string, hook manifest.Hook, delta manifest.Delta, source stri
 	return &step, nil
 }
 
-// commentStep sets the comment on a table, column (target is table.column) or view
+// commentStep sets the comment on a table, column (target is table.column), view or enum
 func commentStep(on string, target string, comment string, source string, position int) Step {
 	describe := on + " " + target
 	return Step{Kind: KindComment, Describe: describe, Source: source, Delta: position, Sql: []string{manifest.CommentDdl(on, target, comment)},
 		Record: Record{Type: "Comment", Name: describe}}
 }
 
-// addedComments are the comments of a view or column a delta adds - a delta that adds an object creates it as its
+// addedComments are the comments of a view, enum or column a delta adds - a delta that adds an object creates it as its
 // state file describes, comment included. A table add's comments are part of its table steps
 func addedComments(delta manifest.Delta, source string, position int) []Step {
 	switch d := delta.(type) {
@@ -437,6 +458,10 @@ func addedComments(delta manifest.Delta, source string, position int) []Step {
 		case "view":
 			if view, err := manifest.ParseViewByName(d.Name); err == nil && view.Comment != "" {
 				return []Step{commentStep("view", d.Name, view.Comment, source, position)}
+			}
+		case "enum":
+			if enum, err := manifest.ParseEnumByName(d.Name); err == nil && enum.Comment != "" {
+				return []Step{commentStep("enum", d.Name, enum.Comment, source, position)}
 			}
 		case "column":
 			if table, err := manifest.ParseTableByName(d.Reference); err == nil {

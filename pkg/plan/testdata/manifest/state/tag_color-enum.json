@@ -1,0 +1,5 @@
+{
+  "name": "tag_color",
+  "values": ["red", "green", "blue"],
+  "comment": "Colors a tag can have"
+}

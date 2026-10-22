@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"bytes"
+	"cmp"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"skima/pkg/util"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -31,6 +33,7 @@ type FileKind string
 const (
 	KindTable     FileKind = "table"
 	KindView      FileKind = "view"
+	KindEnum      FileKind = "enum"
 	KindChangeset FileKind = "changeset"
 )
 
@@ -87,7 +90,7 @@ var compileErr error
 func schemaFor(kind FileKind) (*jsonschema.Schema, error) {
 	compileOnce.Do(func() {
 		compiler := jsonschema.NewCompiler()
-		kinds := []FileKind{KindTable, KindView, KindChangeset}
+		kinds := []FileKind{KindTable, KindView, KindEnum, KindChangeset}
 		for _, k := range kinds {
 			name := fmt.Sprintf("%s.schema.json", k)
 			raw, err := schemaFiles.ReadFile("schemas/" + name)
@@ -131,6 +134,8 @@ func KindOf(path string) (FileKind, bool) {
 		return KindTable, true
 	case strings.HasSuffix(base, "-view.json"):
 		return KindView, true
+	case strings.HasSuffix(base, "-enum.json"):
+		return KindEnum, true
 	case filepath.Ext(base) == ".json" && filepath.Base(filepath.Dir(path)) == "deltas":
 		return KindChangeset, true
 	}
@@ -167,6 +172,13 @@ func validateSchema(path string, kind FileKind) FileValidation {
 	case err == nil:
 	case errors.As(err, &validationErr):
 		result.Issues = leafIssues(validationErr, message.NewPrinter(language.English), nil)
+		// the validator does not report the problems in a fixed order - list them in the order they appear in the file
+		sort.SliceStable(result.Issues, func(i, j int) bool {
+			if c := compareLocations(result.Issues[i].Location, result.Issues[j].Location); c != 0 {
+				return c < 0
+			}
+			return result.Issues[i].Message < result.Issues[j].Message
+		})
 	default:
 		result.Issues = []ValidationIssue{{Message: err.Error()}}
 	}
@@ -185,6 +197,7 @@ var ruleMessages = map[string]string{
 	"#/$defs/columnDelta/allOf/0/else/not":     "newname is only used when the action is rename",
 	"#/$defs/columnDelta/allOf/1/else/not":     "mods is only used when the action is alter",
 	"#/$defs/commentDelta/else/not":            "reference is only used for a column comment - it names the column's table",
+	"#/$defs/enumDelta/else/not":               "value is only used when the action is alter - it names the value to add",
 }
 
 // leafIssues flattens the validation error tree into its leaves - the inner nodes only say which combination of
@@ -213,6 +226,24 @@ func leafIssues(err *jsonschema.ValidationError, printer *message.Printer, issue
 	return issues
 }
 
+// compareLocations orders JSON pointers by their tokens, comparing array indexes as numbers so /deltas/2 comes before
+// /deltas/10
+func compareLocations(a string, b string) int {
+	at, bt := strings.Split(a, "/"), strings.Split(b, "/")
+	for i := 0; i < len(at) && i < len(bt); i++ {
+		ai, aErr := strconv.Atoi(at[i])
+		bi, bErr := strconv.Atoi(bt[i])
+		if aErr == nil && bErr == nil {
+			if ai != bi {
+				return cmp.Compare(ai, bi)
+			}
+		} else if at[i] != bt[i] {
+			return strings.Compare(at[i], bt[i])
+		}
+	}
+	return cmp.Compare(len(at), len(bt))
+}
+
 // syntaxErrorMessage adds the line and column of a JSON syntax error
 func syntaxErrorMessage(raw []byte, err error) string {
 	var syntaxErr *json.SyntaxError
@@ -235,17 +266,17 @@ func jsonPointer(tokens []string) string {
 	return bld.String()
 }
 
-// StateFiles returns the table and view state files in the working directory, the files a state build applies
+// StateFiles returns the table, view and enum state files in the working directory, the files a state build applies
 func StateFiles(workdir string) ([]string, error) {
-	tables, err := filepath.Glob(filepath.Join(workdir, "state", "*-table.json"))
-	if err != nil {
-		return nil, err
+	var files []string
+	for _, suffix := range []string{"-table.json", "-view.json", "-enum.json"} {
+		matches, err := filepath.Glob(filepath.Join(workdir, "state", "*"+suffix))
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, matches...)
 	}
-	views, err := filepath.Glob(filepath.Join(workdir, "state", "*-view.json"))
-	if err != nil {
-		return nil, err
-	}
-	return append(tables, views...), nil
+	return files, nil
 }
 
 // ValidateManifest validates every state and changeset file in the working directory: against the JSON schemas, and
@@ -272,7 +303,7 @@ func ValidateManifest(workdir string, errorsAfter *util.SemanticVersion) ([]File
 	for _, path := range allStateJson {
 		if _, ok := KindOf(path); !ok {
 			ignored := FileValidation{File: path, Issues: []ValidationIssue{{
-				Message: "not a table (<name>-table.json) or view (<name>-view.json) file - skima ignores it",
+				Message: "not a table (<name>-table.json), view (<name>-view.json) or enum (<name>-enum.json) file - skima ignores it",
 			}}}
 			ignored.finish()
 			results = append(results, ignored)

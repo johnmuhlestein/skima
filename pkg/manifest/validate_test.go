@@ -182,6 +182,8 @@ func TestReadmeExamplesValid(t *testing.T) {
 			kind = KindChangeset
 		case doc["sql"] != nil:
 			kind = KindView
+		case doc["values"] != nil:
+			kind = KindEnum
 		default:
 			kind = KindTable
 			if doc["name"] == nil {
@@ -197,5 +199,17 @@ func TestReadmeExamplesValid(t *testing.T) {
 			firstLine := strings.SplitN(strings.TrimSpace(block[1]), "\n", 3)
 			t.Errorf("README example %d (%s, starting %q) is invalid: %+v", i+1, kind, strings.Join(firstLine[:min(2, len(firstLine))], " "), result.Issues)
 		}
+	}
+}
+
+func TestCompareLocations(t *testing.T) {
+	ordered := []string{"", "/columns", "/columns/0", "/columns/0/name", "/columns/2", "/columns/10", "/deltas/2/action", "/deltas/2/on", "/name"}
+	for i := 1; i < len(ordered); i++ {
+		if compareLocations(ordered[i-1], ordered[i]) >= 0 || compareLocations(ordered[i], ordered[i-1]) <= 0 {
+			t.Errorf("EXPECTED %q before %q", ordered[i-1], ordered[i])
+		}
+	}
+	if compareLocations("/deltas/1", "/deltas/1") != 0 {
+		t.Error("EXPECTED equal locations to compare equal")
 	}
 }

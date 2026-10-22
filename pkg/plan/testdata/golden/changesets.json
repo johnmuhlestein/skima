@@ -11,19 +11,41 @@
       "transactional": true,
       "steps": [
         {
-          "kind": "table",
-          "describe": "tags",
+          "kind": "delta",
+          "describe": "add enum tag_color",
           "source": "deltas/v1_0_1.json#/deltas/0",
           "delta": 1,
           "sql": [
-            "create table if not exists tags (id integer primary key generated always as identity,document_id uuid not null,label text not null) "
+            "create type tag_color as enum ('red', 'green', 'blue')"
+          ],
+          "tolerate": [
+            "42P07",
+            "42710"
+          ]
+        },
+        {
+          "kind": "comment",
+          "describe": "enum tag_color",
+          "source": "deltas/v1_0_1.json#/deltas/0",
+          "delta": 1,
+          "sql": [
+            "comment on type tag_color is 'Colors a tag can have'"
+          ]
+        },
+        {
+          "kind": "table",
+          "describe": "tags",
+          "source": "deltas/v1_0_1.json#/deltas/1",
+          "delta": 2,
+          "sql": [
+            "create table if not exists tags (id integer primary key generated always as identity,document_id uuid not null,label text not null,color tag_color) "
           ]
         },
         {
           "kind": "delta",
           "describe": "add column documents.priority",
-          "source": "deltas/v1_0_1.json#/deltas/1",
-          "delta": 2,
+          "source": "deltas/v1_0_1.json#/deltas/2",
+          "delta": 3,
           "sql": [
             "alter table documents add column if not exists priority integer default 0"
           ],
@@ -35,8 +57,8 @@
         {
           "kind": "comment",
           "describe": "column documents.priority",
-          "source": "deltas/v1_0_1.json#/deltas/1",
-          "delta": 2,
+          "source": "deltas/v1_0_1.json#/deltas/2",
+          "delta": 3,
           "sql": [
             "comment on column documents.priority is 'Higher is processed sooner'"
           ]
@@ -44,8 +66,8 @@
         {
           "kind": "post-hook",
           "describe": "add column documents.priority",
-          "source": "deltas/v1_0_1.json#/deltas/1",
-          "delta": 2,
+          "source": "deltas/v1_0_1.json#/deltas/2",
+          "delta": 3,
           "script": "deltas/scripts/backfill_priority.sql",
           "sql": [
             "update documents set priority = 1 where document_type = 'STRUCTURED';\nupdate documents set priority = 0 where priority is null;\n"
@@ -54,8 +76,8 @@
         {
           "kind": "delta",
           "describe": "add index documents.documents_type_idx",
-          "source": "deltas/v1_0_1.json#/deltas/2",
-          "delta": 3,
+          "source": "deltas/v1_0_1.json#/deltas/3",
+          "delta": 4,
           "sql": [
             "create  index if not exists documents_type_idx on documents (document_type)"
           ],
@@ -67,8 +89,8 @@
         {
           "kind": "fk",
           "describe": "tags.tags_document_fk",
-          "source": "deltas/v1_0_1.json#/deltas/0",
-          "delta": 1,
+          "source": "deltas/v1_0_1.json#/deltas/1",
+          "delta": 2,
           "sql": [
             "alter table tags add constraint tags_document_fk foreign key (document_id) references documents (id)"
           ],
@@ -200,6 +222,19 @@
             "42704",
             "42P01"
           ]
+        },
+        {
+          "kind": "delta",
+          "describe": "alter enum tag_color (add value 'blue')",
+          "source": "deltas/v1_0_2.json#/deltas/8",
+          "delta": 9,
+          "sql": [
+            "alter type tag_color add value if not exists 'blue' after 'green'"
+          ],
+          "tolerate": [
+            "42P07",
+            "42710"
+          ]
         }
       ]
     },
@@ -259,6 +294,7 @@
     }
   ],
   "warnings": [
+    "deltas/v1_0_2.json#/deltas/8: changeset 1.0.2 adds the value 'blue' to enum tag_color in a transaction - postgres does not let the value be used until the changeset commits, so use it in a later changeset",
     "changeset 1.0.3 runs without a transaction - a failure part way through leaves the earlier deltas in place"
   ]
 }
