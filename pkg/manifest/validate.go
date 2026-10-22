@@ -184,6 +184,7 @@ var ruleMessages = map[string]string{
 	"#/$defs/fkDelta/else/not":                 "tablename is only used with def - use reference for the table",
 	"#/$defs/columnDelta/allOf/0/else/not":     "newname is only used when the action is rename",
 	"#/$defs/columnDelta/allOf/1/else/not":     "mods is only used when the action is alter",
+	"#/$defs/commentDelta/else/not":            "reference is only used for a column comment - it names the column's table",
 }
 
 // leafIssues flattens the validation error tree into its leaves - the inner nodes only say which combination of

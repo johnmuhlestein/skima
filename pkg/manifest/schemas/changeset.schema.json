@@ -51,7 +51,7 @@
       "required": ["object"],
       "properties": {
         "object": {
-          "enum": ["table", "view", "function", "index", "trigger", "pk", "fk", "constraint", "column", "script"]
+          "enum": ["table", "view", "function", "index", "trigger", "pk", "fk", "constraint", "column", "script", "comment"]
         }
       },
       "allOf": [
@@ -64,7 +64,8 @@
         { "if": { "$ref": "#/$defs/isObject/constraint" }, "then": { "$ref": "#/$defs/tableObjectDelta" } },
         { "if": { "$ref": "#/$defs/isObject/fk" }, "then": { "$ref": "#/$defs/fkDelta" } },
         { "if": { "$ref": "#/$defs/isObject/column" }, "then": { "$ref": "#/$defs/columnDelta" } },
-        { "if": { "$ref": "#/$defs/isObject/script" }, "then": { "$ref": "#/$defs/scriptDelta" } }
+        { "if": { "$ref": "#/$defs/isObject/script" }, "then": { "$ref": "#/$defs/scriptDelta" } },
+        { "if": { "$ref": "#/$defs/isObject/comment" }, "then": { "$ref": "#/$defs/commentDelta" } }
       ]
     },
     "isObject": {
@@ -77,7 +78,8 @@
       "constraint": { "required": ["object"], "properties": { "object": { "const": "constraint" } } },
       "fk": { "required": ["object"], "properties": { "object": { "const": "fk" } } },
       "column": { "required": ["object"], "properties": { "object": { "const": "column" } } },
-      "script": { "required": ["object"], "properties": { "object": { "const": "script" } } }
+      "script": { "required": ["object"], "properties": { "object": { "const": "script" } } },
+      "comment": { "required": ["object"], "properties": { "object": { "const": "comment" } } }
     },
     "namedDelta": {
       "description": "table, view and function deltas - the definition comes from the state files by name",
@@ -190,6 +192,23 @@
         { "required": ["nullable"], "properties": { "nullable": { "const": true } } },
         { "required": ["default"], "properties": { "default": { "const": true } } }
       ]
+    },
+    "commentDelta": {
+      "description": "comment deltas - add sets the comment from the state file of what it comments on, drop removes it. A column comment names its table in reference",
+      "required": ["action", "on", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "object": true,
+        "action": { "$ref": "#/$defs/addDrop" },
+        "on": { "enum": ["table", "column", "view"] },
+        "name": { "$ref": "#/$defs/name" },
+        "reference": { "$ref": "#/$defs/name" },
+        "pre": { "$ref": "#/$defs/hook" },
+        "post": { "$ref": "#/$defs/hook" }
+      },
+      "if": { "required": ["on"], "properties": { "on": { "const": "column" } } },
+      "then": { "required": ["reference"] },
+      "else": { "not": { "required": ["reference"] } }
     },
     "scriptDelta": {
       "description": "SQL deltas - either inline sql statements or a script file in deltas/scripts",

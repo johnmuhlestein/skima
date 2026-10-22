@@ -81,12 +81,13 @@ func noRecord(history *ApplyHistory, stmtType string, status string, desc string
 // skima's own history tables are not part of the state files
 const notHistoryTable = "c.relname not in ('skima_schema_history', 'skima_schema_statements')"
 
-const tablesQuery = `select c.relname from pg_class c where c.relnamespace = $1 and c.relkind in ('r', 'p') and ` + notHistoryTable
+const tablesQuery = `select c.relname, coalesce(obj_description(c.oid, 'pg_class'), '') from pg_class c where c.relnamespace = $1 and c.relkind in ('r', 'p') and ` + notHistoryTable
 
 const columnsQuery = `select c.relname, a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull,
 		coalesce(pg_get_expr(d.adbin, d.adrelid), ''),
 		case a.attidentity when 'a' then 'always' when 'd' then 'by default' else '' end,
-		case a.attgenerated when 's' then 'stored' when 'v' then 'virtual' else '' end
+		case a.attgenerated when 's' then 'stored' when 'v' then 'virtual' else '' end,
+		coalesce(col_description(a.attrelid, a.attnum), '')
 	from pg_attribute a
 	join pg_class c on c.oid = a.attrelid
 	left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
@@ -107,7 +108,7 @@ const triggersQuery = `select c.relname, t.tgname, pg_get_triggerdef(t.oid)
 	from pg_trigger t join pg_class c on c.oid = t.tgrelid
 	where c.relnamespace = $1 and not t.tgisinternal and ` + notHistoryTable
 
-const viewsQuery = `select c.relname, pg_get_viewdef(c.oid) from pg_class c where c.relnamespace = $1 and c.relkind = 'v'`
+const viewsQuery = `select c.relname, pg_get_viewdef(c.oid), coalesce(obj_description(c.oid, 'pg_class'), '') from pg_class c where c.relnamespace = $1 and c.relkind = 'v'`
 
 // readSchema reads the tables and views in the namespace. prefix is the schema name as postgres prints it in index and
 // trigger definitions - it is removed so definitions from different schemas compare equal
@@ -121,15 +122,15 @@ func readSchema(ctx context.Context, q querier, namespace uint32, prefix string)
 		scan  func(rows pgx.Rows) error
 	}{
 		{tablesQuery, func(rows pgx.Rows) error {
-			var table string
-			err := rows.Scan(&table)
-			s.Table(table)
+			var table, comment string
+			err := rows.Scan(&table, &comment)
+			s.Table(table).Comment = comment
 			return err
 		}},
 		{columnsQuery, func(rows pgx.Rows) error {
 			var table, name string
 			var col drift.Column
-			err := rows.Scan(&table, &name, &col.Type, &col.NotNull, &col.Default, &col.Identity, &col.Generated)
+			err := rows.Scan(&table, &name, &col.Type, &col.NotNull, &col.Default, &col.Identity, &col.Generated, &col.Comment)
 			s.Table(table).Columns[name] = col
 			return err
 		}},
@@ -152,9 +153,10 @@ func readSchema(ctx context.Context, q querier, namespace uint32, prefix string)
 			return err
 		}},
 		{viewsQuery, func(rows pgx.Rows) error {
-			var name, def string
-			err := rows.Scan(&name, &def)
-			s.Views[name] = def
+			var name string
+			var view drift.View
+			err := rows.Scan(&name, &view.Definition, &view.Comment)
+			s.Views[name] = view
 			return err
 		}},
 	}

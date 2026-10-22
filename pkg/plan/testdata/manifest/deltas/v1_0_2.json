@@ -2,21 +2,66 @@
   "description": "require a document type",
   "deltas": [
     {
-      "object": "column", "action": "alter", "name": "document_type", "reference": "documents",
-      "mods": { "nullable": true },
-      "pre": { "sql": ["update documents set document_type = 'UNSTRUCTURED' where document_type is null"] }
+      "object": "column",
+      "action": "alter",
+      "name": "document_type",
+      "reference": "documents",
+      "mods": {
+        "nullable": true
+      },
+      "pre": {
+        "sql": [
+          "update documents set document_type = 'UNSTRUCTURED' where document_type is null"
+        ]
+      }
     },
-    { "object": "constraint", "action": "add", "name": "documents_document_type_check", "reference": "documents" },
-    { "object": "column", "action": "rename", "name": "location", "newname": "file_location", "reference": "documents" },
-    { "object": "fk", "action": "drop", "name": "documents_old_fk", "reference": "documents" },
     {
-      "object": "script", "description": "seed the default tags",
+      "object": "constraint",
+      "action": "add",
+      "name": "documents_document_type_check",
+      "reference": "documents"
+    },
+    {
+      "object": "column",
+      "action": "rename",
+      "name": "location",
+      "newname": "file_location",
+      "reference": "documents"
+    },
+    {
+      "object": "fk",
+      "action": "drop",
+      "name": "documents_old_fk",
+      "reference": "documents"
+    },
+    {
+      "object": "script",
+      "description": "seed the default tags",
       "sql": [
         "insert into tags (document_id, label) select id, 'new' from documents",
         "delete from tags where label = 'obsolete'"
       ],
-      "bypass": ["23505"]
+      "bypass": [
+        "23505"
+      ]
     },
-    { "object": "script", "description": "tidy up orphaned tags", "script": "cleanup_tags.sql" }
+    {
+      "object": "script",
+      "description": "tidy up orphaned tags",
+      "script": "cleanup_tags.sql"
+    },
+    {
+      "object": "comment",
+      "action": "add",
+      "on": "column",
+      "name": "document_type",
+      "reference": "documents"
+    },
+    {
+      "object": "comment",
+      "action": "drop",
+      "on": "table",
+      "name": "tags"
+    }
   ]
 }

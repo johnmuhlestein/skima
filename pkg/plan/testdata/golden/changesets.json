@@ -33,6 +33,15 @@
           ]
         },
         {
+          "kind": "comment",
+          "describe": "column documents.priority",
+          "source": "deltas/v1_0_1.json#/deltas/1",
+          "delta": 2,
+          "sql": [
+            "comment on column documents.priority is 'Higher is processed sooner'"
+          ]
+        },
+        {
           "kind": "post-hook",
           "describe": "add column documents.priority",
           "source": "deltas/v1_0_1.json#/deltas/1",
@@ -163,6 +172,34 @@
           "sql": [
             "delete from tags t where not exists (select 1 from documents d where d.id = t.document_id);\n"
           ]
+        },
+        {
+          "kind": "delta",
+          "describe": "add comment on column documents.document_type",
+          "source": "deltas/v1_0_2.json#/deltas/6",
+          "delta": 7,
+          "sql": [
+            "comment on column documents.document_type is 'STRUCTURED or UNSTRUCTURED - it''s required'"
+          ],
+          "tolerate": [
+            "42P07",
+            "42710"
+          ]
+        },
+        {
+          "kind": "delta",
+          "describe": "drop comment on table tags",
+          "source": "deltas/v1_0_2.json#/deltas/7",
+          "delta": 8,
+          "sql": [
+            "comment on table tags is null"
+          ],
+          "tolerate": [
+            "42P07",
+            "42710",
+            "42704",
+            "42P01"
+          ]
         }
       ]
     },
@@ -207,6 +244,15 @@
           "tolerate": [
             "42P07",
             "42710"
+          ]
+        },
+        {
+          "kind": "comment",
+          "describe": "view project_documents",
+          "source": "deltas/v1_0_3.json#/deltas/2",
+          "delta": 3,
+          "sql": [
+            "comment on view project_documents is 'Documents per project'"
           ]
         }
       ]

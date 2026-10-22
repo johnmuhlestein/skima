@@ -30,10 +30,12 @@
     "constraints": {
       "type": "array",
       "items": { "$ref": "#/$defs/constraint" }
-    }
+    },
+    "comment": { "$ref": "#/$defs/comment" }
   },
   "$defs": {
     "name": { "type": "string", "minLength": 1 },
+    "comment": { "type": "string", "minLength": 1, "description": "Set with comment on - remove the property to remove the comment" },
     "nameList": {
       "type": "array",
       "minItems": 1,
@@ -59,7 +61,8 @@
         "generate": {
           "enum": ["always", "by default"],
           "description": "Makes the column an identity primary key - requires primarykey: true"
-        }
+        },
+        "comment": { "$ref": "#/$defs/comment" }
       },
       "dependentSchemas": {
         "generate": {

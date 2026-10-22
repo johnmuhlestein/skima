@@ -1,21 +1,73 @@
 {
   "name": "documents",
   "columns": [
-    { "name": "id", "datatype": "uuid", "nullable": false },
-    { "name": "project_id", "datatype": "uuid", "nullable": false },
-    { "name": "file_location", "datatype": "text", "nullable": true },
-    { "name": "document_type", "datatype": "varchar", "nullable": false },
-    { "name": "priority", "datatype": "integer", "nullable": true, "default": "0" }
+    {
+      "name": "id",
+      "datatype": "uuid",
+      "nullable": false
+    },
+    {
+      "name": "project_id",
+      "datatype": "uuid",
+      "nullable": false
+    },
+    {
+      "name": "file_location",
+      "datatype": "text",
+      "nullable": true
+    },
+    {
+      "name": "document_type",
+      "datatype": "varchar",
+      "nullable": false,
+      "comment": "STRUCTURED or UNSTRUCTURED - it's required"
+    },
+    {
+      "name": "priority",
+      "datatype": "integer",
+      "nullable": true,
+      "default": "0",
+      "comment": "Higher is processed sooner"
+    }
   ],
-  "primary-key": ["id"],
+  "primary-key": [
+    "id"
+  ],
   "foreign-keys": [
-    { "name": "documents_project_fk", "columns": ["project_id"], "reference": { "table": "projects", "columns": ["id"] }, "deleterule": "cascade" }
+    {
+      "name": "documents_project_fk",
+      "columns": [
+        "project_id"
+      ],
+      "reference": {
+        "table": "projects",
+        "columns": [
+          "id"
+        ]
+      },
+      "deleterule": "cascade"
+    }
   ],
   "indexes": [
-    { "name": "documents_type_idx", "columns": ["document_type"] }
+    {
+      "name": "documents_type_idx",
+      "columns": [
+        "document_type"
+      ]
+    }
   ],
   "constraints": [
-    { "name": "documents_file_location_unq", "type": "unique", "columns": ["file_location"] },
-    { "name": "documents_document_type_check", "type": "check", "condition": "document_type in ('STRUCTURED','UNSTRUCTURED')" }
+    {
+      "name": "documents_file_location_unq",
+      "type": "unique",
+      "columns": [
+        "file_location"
+      ]
+    },
+    {
+      "name": "documents_document_type_check",
+      "type": "check",
+      "condition": "document_type in ('STRUCTURED','UNSTRUCTURED')"
+    }
   ]
 }

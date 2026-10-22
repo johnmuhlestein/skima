@@ -92,6 +92,7 @@ type Column struct {
 	Dfltfunc   bool
 	Primarykey bool
 	Generate   string
+	Comment    string
 }
 
 type Trigger struct {
@@ -114,12 +115,14 @@ type Table struct {
 	Indexes     []Index
 	Triggers    []Trigger
 	Constraints []Constraint
+	Comment     string
 }
 
 type View struct {
 	Name    string
 	Columns []string
 	Sql     string
+	Comment string
 }
 
 type Hook struct {
@@ -146,6 +149,8 @@ type SimpleDelta struct {
 	Name      string
 	Reference string
 	NewName   string
+	// On is what a comment delta comments on: table, column or view
+	On string
 	PrePostHook
 }
 
@@ -659,6 +664,15 @@ func (sd SimpleDelta) Ddl() (string, error) {
 				return "", missingDefinition("Table %s did not have a index definition matching %s", sd.Reference, sd.Name)
 			}
 		}
+	case "comment":
+		if sd.Action == "drop" {
+			return CommentDdl(sd.On, sd.commentTarget(), ""), nil
+		}
+		comment, err := sd.stateComment()
+		if err != nil {
+			return "", err
+		}
+		return CommentDdl(sd.On, sd.commentTarget(), comment), nil
 	case "constraint":
 		switch sd.Action {
 		case "drop":
@@ -679,6 +693,75 @@ func (sd SimpleDelta) Ddl() (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// commentTarget is what a comment delta comments on - table.column for a column, otherwise the name
+func (sd SimpleDelta) commentTarget() string {
+	if sd.On == "column" {
+		return sd.Reference + "." + sd.Name
+	}
+	return sd.Name
+}
+
+// stateComment reads the comment a comment delta sets from the state files
+func (sd SimpleDelta) stateComment() (string, error) {
+	var comment string
+	switch sd.On {
+	case "table":
+		t, err := ParseTableByName(sd.Name)
+		if err != nil {
+			return "", fmt.Errorf("Unable to parse the table %s: %w", sd.Name, err)
+		}
+		comment = t.Comment
+	case "column":
+		t, err := sd.referenceTable()
+		if err != nil {
+			return "", err
+		}
+		col, ok := t.Column(sd.Name)
+		if !ok {
+			return "", missingDefinition("Table %s did not have a column definition matching %s", sd.Reference, sd.Name)
+		}
+		comment = col.Comment
+	case "view":
+		v, err := ParseViewByName(sd.Name)
+		if err != nil {
+			return "", fmt.Errorf("Unable to parse the view %s: %w", sd.Name, err)
+		}
+		comment = v.Comment
+	default:
+		return "", missingDefinition("cannot comment on %q - use table, column or view", sd.On)
+	}
+	if comment == "" {
+		return "", missingDefinition("%s %s has no comment in its state file", sd.On, sd.commentTarget())
+	}
+	return comment, nil
+}
+
+// Column returns the table's column with the name
+func (t Table) Column(name string) (Column, bool) {
+	for _, col := range t.Columns {
+		if col.Name == name {
+			return col, true
+		}
+	}
+	return Column{}, false
+}
+
+// CommentDdl sets the comment on a table, column (target is table.column) or view - an empty comment removes it. The
+// comment is quoted as a string literal
+func CommentDdl(on string, target string, comment string) string {
+	literal := "null"
+	if comment != "" {
+		literal = QuoteLiteral(comment)
+	}
+	return fmt.Sprintf("comment on %s %s is %s", on, target, literal)
+}
+
+// QuoteLiteral quotes text as a postgres string literal. With standard_conforming_strings on (the default since
+// postgres 9.1) backslashes in a literal are ordinary characters, so only single quotes are doubled
+func QuoteLiteral(text string) string {
+	return "'" + strings.ReplaceAll(text, "'", "''") + "'"
 }
 
 func (sd SimpleDelta) referenceTable() (Table, error) {
@@ -718,6 +801,9 @@ func (sd SimpleDelta) Describe() string {
 	var bld strings.Builder
 	bld.WriteString(sd.Action)
 	bld.WriteString(" ")
+	if sd.Object == "comment" {
+		fmt.Fprintf(&bld, "comment on %s ", sd.On)
+	}
 	if len(sd.Reference) > 0 {
 		bld.WriteString(sd.Reference)
 		bld.WriteString(".")

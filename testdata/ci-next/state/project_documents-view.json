@@ -1,5 +1,9 @@
 {
-  "name" : "project_documents",
-  "columns" : ["project_name", "document_count"],
-  "sql" : "select p.name, count(d.id) from projects p left join documents d on d.project_id = p.id group by p.name"
+  "name": "project_documents",
+  "columns": [
+    "project_name",
+    "document_count"
+  ],
+  "sql": "select p.name, count(d.id) from projects p left join documents d on d.project_id = p.id group by p.name",
+  "comment": "Document count per project"
 }

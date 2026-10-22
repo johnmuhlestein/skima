@@ -1,21 +1,61 @@
 {
-  "description" : "the next release of the testdata/ci schema - applied by CI on top of its state build",
-  "deltas" : [
-    { "object" : "table", "action" : "add", "name" : "tags" },
+  "description": "the next release of the testdata/ci schema - applied by CI on top of its state build",
+  "deltas": [
     {
-      "object" : "column", "action" : "add", "name" : "description", "reference" : "projects",
-      "post" : { "sql" : ["update projects set description = name where description is null"] }
+      "object": "table",
+      "action": "add",
+      "name": "tags"
     },
-    { "object" : "index", "action" : "add", "name" : "documents_created_idx", "reference" : "documents" },
-    { "object" : "view", "action" : "add", "name" : "project_documents" },
     {
-      "object" : "script", "description" : "seed a project and a document",
-      "sql" : [
+      "object": "column",
+      "action": "add",
+      "name": "description",
+      "reference": "projects",
+      "post": {
+        "sql": [
+          "update projects set description = name where description is null"
+        ]
+      }
+    },
+    {
+      "object": "index",
+      "action": "add",
+      "name": "documents_created_idx",
+      "reference": "documents"
+    },
+    {
+      "object": "view",
+      "action": "add",
+      "name": "project_documents"
+    },
+    {
+      "object": "script",
+      "description": "seed a project and a document",
+      "sql": [
         "insert into projects (id, name) values ('00000000-0000-0000-0000-000000000001', 'ci')",
         "insert into documents (id, project_id, file_location) values ('00000000-0000-0000-0000-00000000000a', '00000000-0000-0000-0000-000000000001', 'ci/readme.md')"
       ],
-      "bypass" : ["23505"]
+      "bypass": [
+        "23505"
+      ]
     },
-    { "object" : "script", "description" : "tag every document", "script" : "tag_documents.sql" }
+    {
+      "object": "script",
+      "description": "tag every document",
+      "script": "tag_documents.sql"
+    },
+    {
+      "object": "comment",
+      "action": "add",
+      "on": "table",
+      "name": "projects"
+    },
+    {
+      "object": "comment",
+      "action": "add",
+      "on": "column",
+      "name": "file_location",
+      "reference": "documents"
+    }
   ]
 }

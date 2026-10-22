@@ -215,6 +215,7 @@ A delta can make the following types of changes
 * primary key - add, drop
 * foreign key - add, drop
 * constraint - add, drop (valid for check and unique)
+* comment - add, drop (on a table, column or view - see [Comments](#comments))
 * column - add, drop, rename, alter
 
 #### Transactions
@@ -318,8 +319,8 @@ Drift in schema app1 (deployed 1.0.3): 3 differences
              expected: CREATE INDEX documents_type_idx ON documents USING btree (document_type)
 ```
 
-* Tables, columns (type, nullability, default, identity, generated), primary key, unique, check and foreign key
-  constraints, indexes, triggers and views are compared. Functions, grants and data are not
+* Tables, columns (type, nullability, default, identity, generated, comment), primary key, unique, check and foreign
+  key constraints, indexes, triggers, views and table and view comments are compared. Functions, grants and data are not
 * Postgres rewrites definitions when it stores them (`varchar` becomes `character varying`, check constraints and views
   are reformatted), so drift does not compare the state files' text. It builds the state files into temporary tables
   in a transaction that is always rolled back and compares how postgres describes those with the real schema. It
@@ -456,7 +457,7 @@ to set up an environment variable `export SKM_DBCONN_PASSWORD=mypassword`
 Some snippets that can help with the different state and delta files
 
 ### View State File
-A view only has 3 attributes
+A view has 3 attributes, and an optional `comment` (see [Comments](#comments))
 * name - the name of the view
 * columns - a list of strings that represent the column names
 * sql - the select statement to create the view - there must be the same number of columns listed in the select as define in the columns attribute
@@ -534,6 +535,37 @@ This example would be the same for both `foreign-keys` (below) array within a Ta
   ]
 }
 ```
+
+### Comments
+Tables, columns and views take an optional `comment`, which skima sets with `comment on`. The text is quoted for you -
+write it as plain text, apostrophes included:
+```json
+{
+  "name" : "documents",
+  "comment" : "Uploaded documents - one row per file",
+  "columns" : [
+    { "name" : "id", "datatype" : "uuid", "nullable" : false },
+    { "name" : "priority", "datatype" : "integer", "nullable" : true, "comment" : "Higher is processed sooner, it's 0 by default" }
+  ]
+}
+```
+A state build sets every comment, and a delta that adds a table, view or column sets the comments its state file
+gives it. To change a comment on an existing object, edit the state file and add a `comment` delta - `add` sets the
+comment from the state file, `drop` removes it. `on` is `table`, `column` or `view`, and a column comment names its
+table in `reference`:
+```json
+{
+  "version": "1.0.5",
+  "description": "describe documents",
+  "deltas": [
+    { "object": "comment", "action": "add", "on": "table", "name": "documents" },
+    { "object": "comment", "action": "add", "on": "column", "name": "priority", "reference": "documents" },
+    { "object": "comment", "action": "drop", "on": "view", "name": "old_report" }
+  ]
+}
+```
+`skima drift` reports a comment in the database that differs from the state files, including one the state files do
+not have.
 
 ### Constraint definition
 skima currently supports adding `check` and `unique` constraints via explicit definition in a state file. You'll notice in the definition there is a `type` attribute

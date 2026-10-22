@@ -17,7 +17,7 @@ var changesetNamePattern = regexp.MustCompile(`^v?\d+(_\d+){0,2}(-[A-Za-z][A-Za-
 type stateIndex struct {
 	tables     map[string]Table
 	tableFiles map[string]string
-	views      map[string]bool
+	views      map[string]View
 }
 
 func stateName(path string, suffix string) string {
@@ -26,7 +26,7 @@ func stateName(path string, suffix string) string {
 
 // indexState parses the state files that passed schema validation
 func indexState(stateResults []*FileValidation) stateIndex {
-	index := stateIndex{tables: map[string]Table{}, tableFiles: map[string]string{}, views: map[string]bool{}}
+	index := stateIndex{tables: map[string]Table{}, tableFiles: map[string]string{}, views: map[string]View{}}
 	for _, result := range stateResults {
 		if !result.Valid {
 			continue
@@ -39,7 +39,9 @@ func indexState(stateResults []*FileValidation) stateIndex {
 				index.tableFiles[name] = result.File
 			}
 		case KindView:
-			index.views[stateName(result.File, "-view.json")] = true
+			if view, err := ParseViewByPath(result.File); err == nil {
+				index.views[stateName(result.File, "-view.json")] = view
+			}
 		}
 	}
 	return index
@@ -179,7 +181,7 @@ func checkSimpleAdd(result *FileValidation, index stateIndex, workdir string, d 
 			result.addIssue(severity, location+"/name", "table '%s' has no valid state file (state/%s-table.json)", d.Name, d.Name)
 		}
 	case "view":
-		if !index.views[d.Name] {
+		if _, ok := index.views[d.Name]; !ok {
 			result.addIssue(severity, location+"/name", "view '%s' has no valid state file (state/%s-view.json)", d.Name, d.Name)
 		}
 	case "function":
@@ -189,6 +191,8 @@ func checkSimpleAdd(result *FileValidation, index stateIndex, workdir string, d 
 			}
 		}
 		result.addIssue(severity, location+"/name", "function '%s' has no sql file - expected %s", d.Name, strings.Join(FunctionFilePaths("", d.Name), " or "))
+	case "comment":
+		checkCommentAdd(result, index, d, location, severity)
 	case "column", "index", "trigger", "fk", "constraint", "pk":
 		table, ok := requireTable(result, index, d.Reference, location, severity)
 		if !ok {
@@ -216,6 +220,42 @@ func checkSimpleAdd(result *FileValidation, index stateIndex, workdir string, d 
 			what := map[string]string{"column": "column", "index": "index", "trigger": "trigger", "fk": "foreign key", "constraint": "constraint"}[d.Object]
 			result.addIssue(severity, location+"/name", "table '%s' has no %s '%s' in %s", d.Reference, what, d.Name, displayFile(index, d.Reference))
 		}
+	}
+}
+
+// checkCommentAdd checks that what a comment add comments on has a comment in its state file - without one the delta
+// generates no DDL and is skipped
+func checkCommentAdd(result *FileValidation, index stateIndex, d SimpleDelta, location string, severity string) {
+	var comment, file string
+	switch d.On {
+	case "table":
+		table, ok := index.tables[d.Name]
+		if !ok {
+			result.addIssue(severity, location+"/name", "table '%s' has no valid state file (state/%s-table.json)", d.Name, d.Name)
+			return
+		}
+		comment, file = table.Comment, displayFile(index, d.Name)
+	case "column":
+		table, ok := requireTable(result, index, d.Reference, location, severity)
+		if !ok {
+			return
+		}
+		col, ok := table.Column(d.Name)
+		if !ok {
+			result.addIssue(severity, location+"/name", "table '%s' has no column '%s' in %s", d.Reference, d.Name, displayFile(index, d.Reference))
+			return
+		}
+		comment, file = col.Comment, displayFile(index, d.Reference)
+	case "view":
+		view, ok := index.views[d.Name]
+		if !ok {
+			result.addIssue(severity, location+"/name", "view '%s' has no valid state file (state/%s-view.json)", d.Name, d.Name)
+			return
+		}
+		comment, file = view.Comment, filepath.Join("state", d.Name+"-view.json")
+	}
+	if comment == "" {
+		result.addIssue(severity, location+"/name", "%s '%s' has no comment in %s - add one, or drop the comment instead", d.On, d.commentTarget(), file)
 	}
 }
 

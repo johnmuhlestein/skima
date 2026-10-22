@@ -1,15 +1,41 @@
 {
   "name": "projects",
   "columns": [
-    { "name": "id", "datatype": "uuid", "nullable": false },
-    { "name": "name", "datatype": "text", "nullable": false },
-    { "name": "last_modified_at", "datatype": "timestamptz", "nullable": false, "default": "NOW()", "dfltfunc": true }
+    {
+      "name": "id",
+      "datatype": "uuid",
+      "nullable": false
+    },
+    {
+      "name": "name",
+      "datatype": "text",
+      "nullable": false
+    },
+    {
+      "name": "last_modified_at",
+      "datatype": "timestamptz",
+      "nullable": false,
+      "default": "NOW()",
+      "dfltfunc": true
+    }
   ],
-  "primary-key": ["id"],
+  "primary-key": [
+    "id"
+  ],
   "indexes": [
-    { "name": "projects_name_idx", "columns": ["name"], "unique": true }
+    {
+      "name": "projects_name_idx",
+      "columns": [
+        "name"
+      ],
+      "unique": true
+    }
   ],
   "triggers": [
-    { "name": "projects_last_modified_trg", "ddl": "create trigger projects_last_modified_trg before update on projects for each row execute function update_last_modified_at()" }
-  ]
+    {
+      "name": "projects_last_modified_trg",
+      "ddl": "create trigger projects_last_modified_trg before update on projects for each row execute function update_last_modified_at()"
+    }
+  ],
+  "comment": "Projects that own documents"
 }

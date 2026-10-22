@@ -83,7 +83,7 @@ func TestStatePlan(t *testing.T) {
 			kinds = append(kinds, step.Kind)
 		}
 	}
-	expected := "sql table index constraint table index trigger table fk view sql"
+	expected := "sql table index constraint comment table index trigger comment table fk view comment sql"
 	if actual := strings.Join(kinds, " "); actual != expected {
 		t.Errorf("EXPECTED step order %q  ACTUAL: %q", expected, actual)
 	}
@@ -283,5 +283,40 @@ func TestWithoutPostSql(t *testing.T) {
 		if strings.HasPrefix(step.Source, "state/sql/post/") {
 			t.Errorf("EXPECTED no post sql steps  ACTUAL: %s", step.Source)
 		}
+	}
+}
+
+// an added view or column is created as its state file describes, comment included - a column added from an
+// explicit definition takes the definition's comment
+func TestAddedComments(t *testing.T) {
+	useManifest(t, writeManifest(t, map[string]string{
+		"state/notes-table.json": `{"name":"notes","columns":[{"name":"id","datatype":"uuid"},{"name":"body","datatype":"text","comment":"The note"}]}`,
+		"state/recent-view.json": `{"name":"recent","columns":["id"],"sql":"select id from notes","comment":"Latest notes"}`,
+		"deltas/v1_0_1.json": `{"deltas":[
+			{"object":"column","action":"add","name":"body","reference":"notes"},
+			{"object":"column","action":"add","name":"draft","reference":"notes","def":{"name":"draft","datatype":"bool","comment":"Not published yet"}},
+			{"object":"view","action":"add","name":"recent","post":{"sql":["select 1"]}}
+		]}`,
+	}))
+	p, err := ForChangesets(util.ExtractVersion("1.0.0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var steps []string
+	for _, step := range p.Units[0].Steps {
+		steps = append(steps, step.Kind+": "+step.Sql[0])
+	}
+	expected := []string{
+		"delta: alter table notes add column if not exists body text not null",
+		"comment: comment on column notes.body is 'The note'",
+		"delta: alter table notes add column if not exists draft bool not null",
+		"comment: comment on column notes.draft is 'Not published yet'",
+		"delta: create or replace view recent (id) as select id from notes",
+		// before the post hook - the delta creates the view with its comment, then the hook runs
+		"comment: comment on view recent is 'Latest notes'",
+		"post-hook: select 1",
+	}
+	if strings.Join(steps, "\n") != strings.Join(expected, "\n") {
+		t.Errorf("EXPECTED\n  %s\nACTUAL:\n  %s", strings.Join(expected, "\n  "), strings.Join(steps, "\n  "))
 	}
 }
