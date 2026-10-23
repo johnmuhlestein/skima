@@ -52,6 +52,8 @@ type executor struct {
 	// out and errOut receive the progress and failure messages
 	out    io.Writer
 	errOut io.Writer
+	// shadow runs each step's Shadow sql in place of its Sql, when it has any - for a shadow build (skima drift)
+	shadow bool
 }
 
 // run executes the steps, returning the number of failures. A failed step with StopOnFailure stops the run, other
@@ -131,7 +133,11 @@ func (e executor) skip(step plan.Step) {
 func (e executor) step(step plan.Step) (ok bool, missingRelation bool) {
 	tolerated := util.FromSlice(step.Tolerate)
 	var toleratedErr *pgconn.PgError
-	for idx, sql := range step.Sql {
+	statements := step.Sql
+	if e.shadow && len(step.Shadow) > 0 {
+		statements = step.Shadow
+	}
+	for idx, sql := range statements {
 		_, err := e.ex.Exec(context.Background(), sql)
 		pgErr := asPgError(err)
 		if err != nil && (pgErr == nil || !tolerated.Has(pgErr.Code)) {

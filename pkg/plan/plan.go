@@ -26,6 +26,7 @@ const (
 	KindComment    = "comment"
 	KindEnum       = "enum"
 	KindSequence   = "sequence"
+	KindMatview    = "matview"
 	KindDelta      = "delta"
 	KindScript     = "script" // a script delta - sql statements or a file in deltas/scripts
 	KindPreHook    = "pre-hook"
@@ -55,7 +56,8 @@ type Step struct {
 	Sql    []string `json:"sql,omitempty"`
 	// Tolerate lists the postgres error codes apply treats as success for this step
 	Tolerate []string `json:"tolerate,omitempty"`
-	// Retryable is set on state build views - apply retries a view that references a relation created after it
+	// Retryable is set on state build views and materialized views, and their parts - apply retries one that references
+	// a relation created after it
 	Retryable bool `json:"retryable,omitempty"`
 	// Deferred is set on the foreign keys of tables a changeset adds and the owners of sequences it adds - they run
 	// after every delta, once every table the changeset adds exists
@@ -68,6 +70,9 @@ type Step struct {
 	StopOnFailure bool `json:"-"`
 	// Record is how apply records the step in the skima_schema_statements history table
 	Record Record `json:"-"`
+	// Shadow is the sql a shadow build (skima drift) runs instead of Sql - for an object that cannot be created as a
+	// temporary object, such as a materialized view
+	Shadow []string `json:"-"`
 }
 
 // Record is how apply records a step in the skima_schema_statements history table
@@ -231,6 +236,24 @@ func ForState(transactional bool) (Plan, error) {
 		}
 	}
 
+	// materialized views are retried with the views - either may select from the other
+	matviewPaths, err := filepath.Glob(filepath.Join(workdir, "state", "*-matview.json"))
+	if err != nil {
+		return Plan{}, err
+	}
+	for _, path := range matviewPaths {
+		mv, err := manifest.ParseMatviewByPath(path)
+		if err != nil {
+			return Plan{}, fmt.Errorf("unable to parse %s: %w", relative(path), err)
+		}
+		create := Step{Kind: KindMatview, Describe: mv.Name, Source: relative(path), Sql: []string{mv.GenerateDdl()}, Shadow: mv.ShadowDdl(),
+			Record: Record{Type: "Create Materialized View", Name: mv.Name}}
+		for _, step := range append([]Step{create}, matviewParts(mv, relative(path), 0)...) {
+			step.Retryable = true
+			unit.Steps = append(unit.Steps, step)
+		}
+	}
+
 	post, err := sqlFileSteps("post", false)
 	if err != nil {
 		return Plan{}, err
@@ -369,7 +392,7 @@ func changesetUnit(path string) (Unit, []string, error) {
 			warnings = append(warnings, fmt.Sprintf("%s: %s", source, last.Note))
 			continue // apply does not run the post hook of a skipped delta
 		}
-		unit.Steps = append(unit.Steps, addedComments(delta, source, position)...)
+		unit.Steps = append(unit.Steps, addedParts(delta, source, position)...)
 		if d, ok := delta.(manifest.SimpleDelta); ok && d.Object == "sequence" && d.Action == "add" {
 			if seq, err := manifest.ParseSequenceByName(d.Name); err == nil && seq.Ownedby != "" {
 				owner := ownedByStep(seq, source, position)
@@ -478,16 +501,34 @@ func ownedByStep(seq manifest.Sequence, source string, position int) Step {
 		Record: Record{Type: "Alter Sequence", Name: describe}}
 }
 
-// commentStep sets the comment on a table, column (target is table.column), view, enum or sequence
+// commentStep sets the comment on a table, column (target is table.column), view, enum, sequence or matview
 func commentStep(on string, target string, comment string, source string, position int) Step {
 	describe := on + " " + target
 	return Step{Kind: KindComment, Describe: describe, Source: source, Delta: position, Sql: []string{manifest.CommentDdl(on, target, comment)},
 		Record: Record{Type: "Comment", Name: describe}}
 }
 
-// addedComments are the comments of a view, enum, sequence or column a delta adds - a delta that adds an object creates it as its
+// matviewParts creates a materialized view's indexes and sets its comment. In a shadow build its comment is on the
+// table that stands in for it (manifest.Matview.ShadowDdl)
+func matviewParts(mv manifest.Matview, source string, position int) []Step {
+	var steps []Step
+	for _, idx := range mv.Indexes {
+		name := mv.Name + "." + idx.Name
+		steps = append(steps, Step{Kind: KindIndex, Describe: name, Source: source, Delta: position, Sql: []string{idx.GenerateDdl(mv.Name)},
+			Record: Record{Type: "Create Index", Name: name}})
+	}
+	if mv.Comment != "" {
+		comment := commentStep("matview", mv.Name, mv.Comment, source, position)
+		comment.Shadow = []string{manifest.CommentDdl("table", mv.Name, mv.Comment)}
+		steps = append(steps, comment)
+	}
+	return steps
+}
+
+// addedParts are the parts of an object a delta adds that are created separately - the comments of a view, enum,
+// sequence or column, and a materialized view's indexes and comment - a delta that adds an object creates it as its
 // state file describes, comment included. A table add's comments are part of its table steps
-func addedComments(delta manifest.Delta, source string, position int) []Step {
+func addedParts(delta manifest.Delta, source string, position int) []Step {
 	switch d := delta.(type) {
 	case manifest.SimpleDelta:
 		if d.Action != "add" {
@@ -505,6 +546,10 @@ func addedComments(delta manifest.Delta, source string, position int) []Step {
 		case "sequence":
 			if seq, err := manifest.ParseSequenceByName(d.Name); err == nil && seq.Comment != "" {
 				return []Step{commentStep("sequence", d.Name, seq.Comment, source, position)}
+			}
+		case "matview":
+			if mv, err := manifest.ParseMatviewByName(d.Name); err == nil {
+				return matviewParts(mv, source, position)
 			}
 		case "column":
 			if table, err := manifest.ParseTableByName(d.Reference); err == nil {

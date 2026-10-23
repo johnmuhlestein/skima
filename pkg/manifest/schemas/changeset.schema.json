@@ -51,7 +51,7 @@
       "required": ["object"],
       "properties": {
         "object": {
-          "enum": ["table", "view", "function", "index", "trigger", "pk", "fk", "constraint", "column", "script", "comment", "enum", "sequence"]
+          "enum": ["table", "view", "function", "index", "trigger", "pk", "fk", "constraint", "column", "script", "comment", "enum", "sequence", "matview"]
         }
       },
       "allOf": [
@@ -67,7 +67,8 @@
         { "if": { "$ref": "#/$defs/isObject/script" }, "then": { "$ref": "#/$defs/scriptDelta" } },
         { "if": { "$ref": "#/$defs/isObject/comment" }, "then": { "$ref": "#/$defs/commentDelta" } },
         { "if": { "$ref": "#/$defs/isObject/enumType" }, "then": { "$ref": "#/$defs/enumDelta" } },
-        { "if": { "$ref": "#/$defs/isObject/sequence" }, "then": { "$ref": "#/$defs/sequenceDelta" } }
+        { "if": { "$ref": "#/$defs/isObject/sequence" }, "then": { "$ref": "#/$defs/sequenceDelta" } },
+        { "if": { "$ref": "#/$defs/isObject/matview" }, "then": { "$ref": "#/$defs/matviewDelta" } }
       ]
     },
     "isObject": {
@@ -83,7 +84,8 @@
       "script": { "required": ["object"], "properties": { "object": { "const": "script" } } },
       "comment": { "required": ["object"], "properties": { "object": { "const": "comment" } } },
       "enumType": { "required": ["object"], "properties": { "object": { "const": "enum" } } },
-      "sequence": { "required": ["object"], "properties": { "object": { "const": "sequence" } } }
+      "sequence": { "required": ["object"], "properties": { "object": { "const": "sequence" } } },
+      "matview": { "required": ["object"], "properties": { "object": { "const": "matview" } } }
     },
     "namedDelta": {
       "description": "table, view and function deltas - the definition comes from the state files by name",
@@ -204,7 +206,7 @@
       "properties": {
         "object": true,
         "action": { "$ref": "#/$defs/addDrop" },
-        "on": { "enum": ["table", "column", "view", "enum", "sequence"] },
+        "on": { "enum": ["table", "column", "view", "enum", "sequence", "matview"] },
         "name": { "$ref": "#/$defs/name" },
         "reference": { "$ref": "#/$defs/name" },
         "pre": { "$ref": "#/$defs/hook" },
@@ -241,6 +243,24 @@
         "pre": { "$ref": "#/$defs/hook" },
         "post": { "$ref": "#/$defs/hook" }
       }
+    },
+    "matviewDelta": {
+      "description": "materialized view deltas - add creates it with its indexes and comment from its state file, drop drops it, refresh refreshes its data",
+      "required": ["action", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "object": true,
+        "action": { "enum": ["add", "drop", "refresh"] },
+        "name": { "$ref": "#/$defs/name" },
+        "concurrently": {
+          "type": "boolean",
+          "description": "Refresh without locking out reads - needs a unique index on the materialized view"
+        },
+        "pre": { "$ref": "#/$defs/hook" },
+        "post": { "$ref": "#/$defs/hook" }
+      },
+      "if": { "required": ["action"], "properties": { "action": { "const": "refresh" } } },
+      "else": { "not": { "required": ["concurrently"] } }
     },
     "scriptDelta": {
       "description": "SQL deltas - either inline sql statements or a script file in deltas/scripts",

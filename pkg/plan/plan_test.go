@@ -83,7 +83,7 @@ func TestStatePlan(t *testing.T) {
 			kinds = append(kinds, step.Kind)
 		}
 	}
-	expected := "sql enum comment sequence comment table index constraint comment table index trigger comment table sequence fk view comment sql"
+	expected := "sql enum comment sequence comment table index constraint comment table index trigger comment table sequence fk view comment matview index comment sql"
 	if actual := strings.Join(kinds, " "); actual != expected {
 		t.Errorf("EXPECTED step order %q  ACTUAL: %q", expected, actual)
 	}

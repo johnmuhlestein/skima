@@ -217,6 +217,28 @@ func TestConnectionError(t *testing.T) {
 	}
 }
 
+// a shadow build runs a step's Shadow sql in place of its Sql - apply always runs the Sql
+func TestShadowStatements(t *testing.T) {
+	step := plan.Step{Kind: plan.KindMatview, Describe: "doc_counts", Sql: []string{"create materialized view"},
+		Shadow: []string{"create scratch view", "create stand-in table"}, Record: plan.Record{Type: "Create Materialized View", Name: "doc_counts"}}
+	plain := deltaStep("other")
+	for _, shadow := range []bool{false, true} {
+		ex := &fakeExecer{errs: map[string][]error{}}
+		hist := &fakeHistory{}
+		e := executor{ex: ex, record: hist.record, history: &ApplyHistory{}, out: io.Discard, errOut: io.Discard, shadow: shadow}
+		if failures := e.run([]plan.Step{step, plain}); failures != 0 {
+			t.Fatalf("shadow %v: %d failures", shadow, failures)
+		}
+		expected := "create materialized view,other"
+		if shadow {
+			expected = "create scratch view,create stand-in table,other"
+		}
+		if strings.Join(ex.executed, ",") != expected {
+			t.Errorf("shadow %v: EXPECTED %s  ACTUAL: %v", shadow, expected, ex.executed)
+		}
+	}
+}
+
 // executing a real plan writes the history rows apply always has - and one success row per planned statement
 func TestPlanHistoryRows(t *testing.T) {
 	viper.Set("workdir", "../plan/testdata/manifest")
@@ -242,8 +264,9 @@ func TestPlanHistoryRows(t *testing.T) {
 		"Delta script hook", "delta add index", "Alter Sequence", "Add FK", // 1.0.1
 		"pre-hook sql [0]", "delta alter column", "delta add constraint", "delta rename column", "delta drop fk",
 		"delta sql [0]", "delta sql [1]", "delta script sql [0]", "delta add comment", "delta drop comment", "delta alter enum",
-		"delta alter sequence",                                             // 1.0.2
-		"delta sql [0]", "delta add function", "delta add view", "Comment", // 1.0.3
+		"delta alter sequence", // 1.0.2
+		"delta sql [0]", "delta add function", "delta add view", "Comment",
+		"delta add matview", "Create Index", "Comment", "delta add view", "delta refresh matview", // 1.0.3
 	}
 	if strings.Join(types, "|") != strings.Join(expected, "|") {
 		t.Errorf("EXPECTED history rows\n  %v\nACTUAL:\n  %v", expected, types)

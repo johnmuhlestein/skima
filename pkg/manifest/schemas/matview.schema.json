@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/johnmuhlestein/skima/main/pkg/manifest/schemas/matview.schema.json",
+  "title": "skima materialized view definition",
+  "description": "A materialized view state file (state/<name>-matview.json)",
+  "type": "object",
+  "required": ["name", "columns", "sql"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "name": { "$ref": "table.schema.json#/$defs/name" },
+    "columns": {
+      "$ref": "table.schema.json#/$defs/nameList",
+      "description": "The materialized view's column names - must match the number of columns the sql selects"
+    },
+    "sql": { "type": "string", "minLength": 1 },
+    "data": {
+      "type": "boolean",
+      "description": "false creates it with no data - it is empty until refreshed. true by default"
+    },
+    "indexes": {
+      "type": "array",
+      "items": { "$ref": "table.schema.json#/$defs/index" },
+      "description": "A refresh concurrently needs a unique index on one or more columns, with no where clause"
+    },
+    "comment": { "$ref": "table.schema.json#/$defs/comment" }
+  }
+}

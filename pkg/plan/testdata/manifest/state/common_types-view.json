@@ -1,0 +1,5 @@
+{
+  "name": "common_types",
+  "columns": ["document_type"],
+  "sql": "select document_type from document_counts where n > 1"
+}

@@ -1,4 +1,4 @@
-Plan for schema app1: not managed by skima yet - build version 1.0.3 from the state files (22 statements)
+Plan for schema app1: not managed by skima yet - build version 1.0.3 from the state files (26 statements)
 
 == state build 1.0.3  [transaction]
 -- sql update_last_modified_at.sql
@@ -45,10 +45,18 @@ alter sequence tag_seq owned by tags.seq_no;
 alter table documents add constraint documents_project_fk foreign key (project_id) references projects (id) on delete cascade;
 -- fk tags.tags_document_fk  (tolerates 42710)
 alter table tags add constraint tags_document_fk foreign key (document_id) references documents (id);
--- view project_documents  (retried if it depends on a view created after it)
+-- view common_types  (retried if it depends on a view or materialized view created after it)
+create or replace view common_types (document_type) as select document_type from document_counts where n > 1;
+-- view project_documents  (retried if it depends on a view or materialized view created after it)
 create or replace view project_documents (project_name,document_id,document_type) as select p.name, d.id, d.document_type from projects p join documents d on d.project_id = p.id;
--- comment view project_documents  (retried if it depends on a view created after it)
+-- comment view project_documents  (retried if it depends on a view or materialized view created after it)
 comment on view project_documents is 'Documents per project';
+-- matview document_counts  (retried if it depends on a view or materialized view created after it)
+create materialized view if not exists document_counts (document_type,n) as select document_type, count(*) from documents group by document_type with data;
+-- index document_counts.document_counts_type_idx  (retried if it depends on a view or materialized view created after it)
+create unique index if not exists document_counts_type_idx on document_counts (document_type);
+-- comment matview document_counts  (retried if it depends on a view or materialized view created after it)
+comment on materialized view document_counts is 'Documents per type';
 -- sql seed_projects.sql
 --   state/sql/post/seed_projects.sql:
 insert into projects (id, name) values ('00000000-0000-0000-0000-000000000001', 'default') on conflict do nothing;

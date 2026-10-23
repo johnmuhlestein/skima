@@ -1,0 +1,9 @@
+{
+  "name": "document_counts",
+  "columns": ["document_type", "n"],
+  "sql": "select document_type, count(*) from documents group by document_type",
+  "indexes": [
+    { "name": "document_counts_type_idx", "columns": ["document_type"], "unique": true }
+  ],
+  "comment": "Documents per type"
+}

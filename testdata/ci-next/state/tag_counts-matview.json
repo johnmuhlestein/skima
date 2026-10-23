@@ -1,0 +1,9 @@
+{
+  "name" : "tag_counts",
+  "columns" : ["label", "n"],
+  "sql" : "select label, count(*) from tags group by label",
+  "indexes" : [
+    { "name" : "tag_counts_label_idx", "columns" : ["label"], "unique" : true }
+  ],
+  "comment" : "Documents per tag"
+}

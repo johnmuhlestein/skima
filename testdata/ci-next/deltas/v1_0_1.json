@@ -10,6 +10,8 @@
     },
     { "object" : "index", "action" : "add", "name" : "documents_created_idx", "reference" : "documents" },
     { "object" : "view", "action" : "add", "name" : "project_documents" },
+    { "object" : "matview", "action" : "add", "name" : "tag_counts" },
+    { "object" : "view", "action" : "add", "name" : "busy_tags" },
     {
       "object" : "script", "description" : "seed a project and a document",
       "sql" : [
@@ -19,6 +21,7 @@
       "bypass" : ["23505"]
     },
     { "object" : "script", "description" : "tag every document", "script" : "tag_documents.sql" },
+    { "object" : "matview", "action" : "refresh", "name" : "tag_counts", "concurrently" : true },
     { "object" : "comment", "action" : "add", "on" : "table", "name" : "projects" },
     { "object" : "comment", "action" : "add", "on" : "column", "name" : "file_location", "reference" : "documents" }
   ]

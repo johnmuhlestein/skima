@@ -186,6 +186,15 @@
         },
         {
           "kind": "view",
+          "describe": "common_types",
+          "source": "state/common_types-view.json",
+          "sql": [
+            "create or replace view common_types (document_type) as select document_type from document_counts where n \u003e 1"
+          ],
+          "retryable": true
+        },
+        {
+          "kind": "view",
           "describe": "project_documents",
           "source": "state/project_documents-view.json",
           "sql": [
@@ -199,6 +208,33 @@
           "source": "state/project_documents-view.json",
           "sql": [
             "comment on view project_documents is 'Documents per project'"
+          ],
+          "retryable": true
+        },
+        {
+          "kind": "matview",
+          "describe": "document_counts",
+          "source": "state/document_counts-matview.json",
+          "sql": [
+            "create materialized view if not exists document_counts (document_type,n) as select document_type, count(*) from documents group by document_type with data"
+          ],
+          "retryable": true
+        },
+        {
+          "kind": "index",
+          "describe": "document_counts.document_counts_type_idx",
+          "source": "state/document_counts-matview.json",
+          "sql": [
+            "create unique index if not exists document_counts_type_idx on document_counts (document_type)"
+          ],
+          "retryable": true
+        },
+        {
+          "kind": "comment",
+          "describe": "matview document_counts",
+          "source": "state/document_counts-matview.json",
+          "sql": [
+            "comment on materialized view document_counts is 'Documents per type'"
           ],
           "retryable": true
         },

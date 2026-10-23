@@ -20,6 +20,7 @@ type stateIndex struct {
 	views      map[string]View
 	enums      map[string]Enum
 	sequences  map[string]Sequence
+	matviews   map[string]Matview
 }
 
 func stateName(path string, suffix string) string {
@@ -28,7 +29,7 @@ func stateName(path string, suffix string) string {
 
 // indexState parses the state files that passed schema validation
 func indexState(stateResults []*FileValidation) stateIndex {
-	index := stateIndex{tables: map[string]Table{}, tableFiles: map[string]string{}, views: map[string]View{}, enums: map[string]Enum{}, sequences: map[string]Sequence{}}
+	index := stateIndex{tables: map[string]Table{}, tableFiles: map[string]string{}, views: map[string]View{}, enums: map[string]Enum{}, sequences: map[string]Sequence{}, matviews: map[string]Matview{}}
 	for _, result := range stateResults {
 		if !result.Valid {
 			continue
@@ -51,6 +52,10 @@ func indexState(stateResults []*FileValidation) stateIndex {
 		case KindSequence:
 			if seq, err := ParseSequenceByPath(result.File); err == nil {
 				index.sequences[stateName(result.File, "-sequence.json")] = seq
+			}
+		case KindMatview:
+			if mv, err := ParseMatviewByPath(result.File); err == nil {
+				index.matviews[stateName(result.File, "-matview.json")] = mv
 			}
 		}
 	}
@@ -80,6 +85,22 @@ func checkStateReferences(result *FileValidation, index stateIndex) {
 		return
 	}
 	switch result.Kind {
+	case KindMatview:
+		fileName := stateName(result.File, "-matview.json")
+		mv, ok := index.matviews[fileName]
+		if !ok {
+			return
+		}
+		if mv.Name != fileName {
+			result.addIssue(SeverityError, "/name", "name '%s' does not match the file name - deltas load this file as materialized view '%s'", mv.Name, fileName)
+		}
+		for i, idx := range mv.Indexes {
+			for j, column := range idx.Columns {
+				if !slices.Contains(mv.Columns, column) {
+					result.addIssue(SeverityError, fmt.Sprintf("/indexes/%d/columns/%d", i, j), "index column '%s' is not a column of materialized view '%s'", column, mv.Name)
+				}
+			}
+		}
 	case KindSequence:
 		fileName := stateName(result.File, "-sequence.json")
 		seq, ok := index.sequences[fileName]
@@ -198,15 +219,18 @@ func checkChangesetReferences(result *FileValidation, index stateIndex, workdir 
 				}
 			}
 		case SimpleDelta:
-			if d.Action != "add" && !(d.Action == "alter" && (d.Object == "enum" || d.Object == "sequence")) {
-				continue // drop and rename do not read state - an enum or sequence alter does
+			readsState := d.Action == "add" || (d.Action == "alter" && (d.Object == "enum" || d.Object == "sequence")) ||
+				(d.Object == "matview" && d.Concurrently)
+			if !readsState {
+				continue // drop and rename do not read state - an enum or sequence alter, and a refresh concurrently, do
 			}
 			checkSimpleAdd(result, index, workdir, d, location, severity)
 		}
 	}
 }
 
-// checkSimpleAdd checks a delta that reads its definition from the state files - an add, or an enum or sequence alter
+// checkSimpleAdd checks a delta that reads its definition from the state files - an add, an enum or sequence alter, or
+// a refresh concurrently
 func checkSimpleAdd(result *FileValidation, index stateIndex, workdir string, d SimpleDelta, location string, severity string) {
 	switch d.Object {
 	case "table":
@@ -226,6 +250,14 @@ func checkSimpleAdd(result *FileValidation, index stateIndex, workdir string, d 
 		result.addIssue(severity, location+"/name", "function '%s' has no sql file - expected %s", d.Name, strings.Join(FunctionFilePaths("", d.Name), " or "))
 	case "comment":
 		checkCommentAdd(result, index, d, location, severity)
+	case "matview":
+		mv, ok := index.matviews[d.Name]
+		switch {
+		case !ok:
+			result.addIssue(severity, location+"/name", "materialized view '%s' has no valid state file (state/%s-matview.json)", d.Name, d.Name)
+		case d.Concurrently && !mv.UniqueIndex():
+			result.addIssue(severity, location+"/concurrently", "a refresh concurrently needs a unique index on materialized view '%s' - add one to state/%s-matview.json and the changeset", d.Name, d.Name)
+		}
 	case "sequence":
 		if _, ok := index.sequences[d.Name]; !ok {
 			result.addIssue(severity, location+"/name", "sequence '%s' has no valid state file (state/%s-sequence.json)", d.Name, d.Name)
@@ -238,6 +270,13 @@ func checkSimpleAdd(result *FileValidation, index stateIndex, workdir string, d 
 			result.addIssue(severity, location+"/value", "enum '%s' has no value '%s' in state/%s-enum.json - add it there, in the position it should have", d.Name, d.Value, d.Name)
 		}
 	case "column", "index", "trigger", "fk", "constraint", "pk":
+		if mv, ok := index.matviews[d.Reference]; ok && d.Object == "index" {
+			// an index on a materialized view is defined in its state file
+			if !slices.ContainsFunc(mv.Indexes, func(i Index) bool { return i.Name == d.Name }) {
+				result.addIssue(severity, location+"/name", "materialized view '%s' has no index '%s' in state/%s-matview.json", d.Reference, d.Name, d.Reference)
+			}
+			return
+		}
 		table, ok := requireTable(result, index, d.Reference, location, severity)
 		if !ok {
 			return
@@ -311,6 +350,13 @@ func checkCommentAdd(result *FileValidation, index stateIndex, d SimpleDelta, lo
 			return
 		}
 		comment, file = seq.Comment, filepath.Join("state", d.Name+"-sequence.json")
+	case "matview":
+		mv, ok := index.matviews[d.Name]
+		if !ok {
+			result.addIssue(severity, location+"/name", "materialized view '%s' has no valid state file (state/%s-matview.json)", d.Name, d.Name)
+			return
+		}
+		comment, file = mv.Comment, filepath.Join("state", d.Name+"-matview.json")
 	}
 	if comment == "" {
 		result.addIssue(severity, location+"/name", "%s '%s' has no comment in %s - add one, or drop the comment instead", d.On, d.commentTarget(), file)

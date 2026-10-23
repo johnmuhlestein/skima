@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"skima/pkg/drift"
+	"skima/pkg/manifest"
 	"skima/pkg/plan"
 	"strings"
 
@@ -58,11 +59,29 @@ func ReadSchemas(stateBuild plan.Unit) (actual drift.Schema, expected drift.Sche
 		return actual, expected, err
 	}
 	var failures strings.Builder
-	shadow := executor{ex: savepointExecer{tx: tx, optOut: "it cannot be compared"}, record: noRecord, history: &ApplyHistory{}, out: io.Discard, errOut: &failures}
+	shadow := executor{ex: savepointExecer{tx: tx, optOut: "it cannot be compared"}, record: noRecord, history: &ApplyHistory{}, out: io.Discard, errOut: &failures,
+		shadow: true}
 	if shadow.run(stateBuild.Steps) > 0 {
 		// nothing is recorded, so the statement ids in the messages mean nothing
 		messages := strings.ReplaceAll(failures.String(), " - Statement ID: 0", "")
 		return actual, expected, fmt.Errorf("unable to build the schema the state files describe:\n%s", strings.TrimSpace(messages))
+	}
+	// a view that selects from a view or materialized view the build creates after it is bound to the real one when it
+	// is created - the real schema is on the search path too, so it does not fail and wait for a retry. Now that every
+	// temporary object exists, create the views again so they select from the build's objects
+	for _, step := range stateBuild.Steps {
+		var view string
+		switch step.Kind {
+		case plan.KindView:
+			view = step.Sql[0]
+		case plan.KindMatview:
+			view = step.Shadow[0] // the scratch view with the materialized view's query
+		default:
+			continue
+		}
+		if _, err = tx.Exec(ctx, view); err != nil {
+			return actual, expected, fmt.Errorf("unable to build the schema the state files describe: recreating view %s: %w", step.Describe, err)
+		}
 	}
 	if err = tx.QueryRow(ctx, "select pg_my_temp_schema()").Scan(&namespace); err != nil {
 		return actual, expected, err
@@ -70,7 +89,27 @@ func ReadSchemas(stateBuild plan.Unit) (actual drift.Schema, expected drift.Sche
 	if expected, err = readSchema(ctx, tx, namespace, "pg_temp"); err != nil {
 		return actual, expected, fmt.Errorf("unable to read the schema the state files describe: %w", err)
 	}
+	for _, step := range stateBuild.Steps {
+		if step.Kind == plan.KindMatview {
+			standInMatview(expected, step.Describe)
+		}
+	}
 	return actual, expected, nil
+}
+
+// standInMatview turns the objects that stood in for a materialized view in the shadow build back into the
+// materialized view: its definition from the scratch view, its indexes and comment from the table with its name (see
+// manifest.Matview.ShadowDdl)
+func standInMatview(s drift.Schema, name string) {
+	scratch := manifest.MatviewShadowPrefix + name
+	mv := s.Matview(name)
+	mv.Definition = s.Views[scratch].Definition
+	if table, ok := s.Tables[name]; ok {
+		mv.Indexes = table.Indexes
+		mv.Comment = table.Comment
+	}
+	delete(s.Views, scratch)
+	delete(s.Tables, name)
 }
 
 // noRecord records nothing - the shadow build is not an apply
@@ -98,8 +137,9 @@ const constraintsQuery = `select c.relname, con.conname, pg_get_constraintdef(co
 	from pg_constraint con join pg_class c on c.oid = con.conrelid
 	where c.relnamespace = $1 and con.contype in ('c', 'f', 'p', 'u', 'x') and ` + notHistoryTable
 
-// indexes that back a primary key, unique or exclusion constraint are compared as the constraint
-const indexesQuery = `select c.relname, i.relname, pg_get_indexdef(x.indexrelid)
+// indexes of tables and materialized views - those that back a primary key, unique or exclusion constraint are
+// compared as the constraint
+const indexesQuery = `select c.relname, c.relkind = 'm', i.relname, pg_get_indexdef(x.indexrelid)
 	from pg_index x join pg_class i on i.oid = x.indexrelid join pg_class c on c.oid = x.indrelid
 	where c.relnamespace = $1 and ` + notHistoryTable + ` and not exists (
 		select 1 from pg_constraint con where con.conindid = x.indexrelid and con.contype in ('p', 'u', 'x'))`
@@ -124,6 +164,9 @@ const sequencesQuery = `select c.relname, format_type(s.seqtypid, null), s.seqst
 	from pg_class c join pg_sequence s on s.seqrelid = c.oid
 	where c.relnamespace = $1 and c.relkind = 'S' and not exists (
 		select 1 from pg_depend d where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'i')`
+
+const matviewsQuery = `select c.relname, pg_get_viewdef(c.oid), coalesce(obj_description(c.oid, 'pg_class'), '')
+	from pg_class c where c.relnamespace = $1 and c.relkind = 'm'`
 
 const viewsQuery = `select c.relname, pg_get_viewdef(c.oid), coalesce(obj_description(c.oid, 'pg_class'), '') from pg_class c where c.relnamespace = $1 and c.relkind = 'v'`
 
@@ -159,8 +202,20 @@ func readSchema(ctx context.Context, q querier, namespace uint32, prefix string)
 		}},
 		{indexesQuery, func(rows pgx.Rows) error {
 			var table, name, def string
-			err := rows.Scan(&table, &name, &def)
-			s.Table(table).Indexes[name] = unqualify(def)
+			var matview bool
+			err := rows.Scan(&table, &matview, &name, &def)
+			if matview {
+				s.Matview(table).Indexes[name] = unqualify(def)
+			} else {
+				s.Table(table).Indexes[name] = unqualify(def)
+			}
+			return err
+		}},
+		{matviewsQuery, func(rows pgx.Rows) error {
+			var name, def, comment string
+			err := rows.Scan(&name, &def, &comment)
+			mv := s.Matview(name)
+			mv.Definition, mv.Comment = def, comment
 			return err
 		}},
 		{triggersQuery, func(rows pgx.Rows) error {

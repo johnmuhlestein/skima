@@ -16,6 +16,25 @@ type Schema struct {
 	Views     map[string]View
 	Enums     map[string]Enum
 	Sequences map[string]Sequence
+	Matviews  map[string]*Matview
+}
+
+// Matview is a materialized view's definition (pg_get_viewdef), comment and indexes - indexes map a name to its
+// definition, without the schema name
+type Matview struct {
+	Definition string
+	Comment    string
+	Indexes    map[string]string
+}
+
+// Matview returns the named materialized view, adding it when the schema does not have it yet
+func (s Schema) Matview(name string) *Matview {
+	mv, ok := s.Matviews[name]
+	if !ok {
+		mv = &Matview{Indexes: map[string]string{}}
+		s.Matviews[name] = mv
+	}
+	return mv
 }
 
 // Sequence is a sequence's settings, owner and comment - sequences of identity columns are compared as the column
@@ -70,7 +89,8 @@ type Column struct {
 
 // NewSchema returns an empty schema
 func NewSchema() Schema {
-	return Schema{Tables: map[string]*Table{}, Views: map[string]View{}, Enums: map[string]Enum{}, Sequences: map[string]Sequence{}}
+	return Schema{Tables: map[string]*Table{}, Views: map[string]View{}, Enums: map[string]Enum{}, Sequences: map[string]Sequence{},
+		Matviews: map[string]*Matview{}}
 }
 
 // Table returns the named table, adding it when the schema does not have it yet
@@ -111,20 +131,22 @@ const (
 // Finding is one difference between the schema in the database and the schema its state files describe
 type Finding struct {
 	Change string `json:"change"` // missing, extra or changed
-	Object string `json:"object"` // table, column, constraint, index, trigger, view, enum or sequence
-	// Name is the object's name - qualified by its table for columns, constraints, indexes and triggers
+	Object string `json:"object"` // table, column, constraint, index, trigger, view, matview, enum or sequence
+	// Name is the object's name - qualified by its table (or materialized view) for columns, constraints, indexes and
+	// triggers
 	Name string `json:"name"`
 	// Attribute is the part of a changed object that differs: a column's type, nullable, default, identity or
 	// generated, a sequence's type, start, increment, minvalue, maxvalue, cache, cycle or owned by, or the comment of a
-	// table, column, view, enum or sequence
+	// table, column, view, materialized view, enum or sequence
 	Attribute string `json:"attribute,omitempty"`
 	Expected  string `json:"expected,omitempty"`
 	Actual    string `json:"actual,omitempty"`
 }
 
-// table is the table a finding belongs to - its name, for a table, view, enum or sequence
+// table is the table a finding belongs to - its name, for a table, view, materialized view, enum or sequence
 func (f Finding) table() string {
-	if f.Object == "table" || f.Object == "view" || f.Object == "enum" || f.Object == "sequence" {
+	switch f.Object {
+	case "table", "view", "matview", "enum", "sequence":
 		return f.Name
 	}
 	table, _, _ := strings.Cut(f.Name, ".")
@@ -157,8 +179,9 @@ func Compare(expected Schema, actual Schema) []Finding {
 	findings = append(findings, compareViews(expected.Views, actual.Views)...)
 	findings = append(findings, compareEnums(expected.Enums, actual.Enums)...)
 	findings = append(findings, compareSequences(expected.Sequences, actual.Sequences)...)
+	findings = append(findings, compareMatviews(expected.Matviews, actual.Matviews)...)
 
-	objectOrder := map[string]int{"table": 0, "view": 0, "enum": 0, "sequence": 0, "column": 1, "constraint": 2, "index": 3, "trigger": 4}
+	objectOrder := map[string]int{"table": 0, "view": 0, "matview": 0, "enum": 0, "sequence": 0, "column": 1, "constraint": 2, "index": 3, "trigger": 4}
 	sort.Slice(findings, func(i, j int) bool {
 		a, b := findings[i], findings[j]
 		if a.table() != b.table() {
@@ -263,6 +286,29 @@ func compareEnums(expected map[string]Enum, actual map[string]Enum) []Finding {
 		if act, ok := actual[name]; ok && exp.Comment != act.Comment {
 			findings = append(findings, commentFinding("enum", name, exp.Comment, act.Comment))
 		}
+	}
+	return findings
+}
+
+// compareMatviews compares materialized views by their definition, comment and indexes
+func compareMatviews(expected map[string]*Matview, actual map[string]*Matview) []Finding {
+	definitions := func(matviews map[string]*Matview) map[string]string {
+		defs := map[string]string{}
+		for name, mv := range matviews {
+			defs[name] = mv.Definition
+		}
+		return defs
+	}
+	findings := compareDefinitions("matview", "", definitions(expected), definitions(actual))
+	for name, exp := range expected {
+		act, ok := actual[name]
+		if !ok {
+			continue
+		}
+		if exp.Comment != act.Comment {
+			findings = append(findings, commentFinding("matview", name, exp.Comment, act.Comment))
+		}
+		findings = append(findings, compareDefinitions("index", name, exp.Indexes, act.Indexes)...)
 	}
 	return findings
 }

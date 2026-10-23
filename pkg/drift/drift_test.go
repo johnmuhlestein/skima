@@ -310,3 +310,29 @@ func TestSequences(t *testing.T) {
 		t.Errorf("EXPECTED the missing sequence described  ACTUAL: %q", f.Expected)
 	}
 }
+
+func TestMatviews(t *testing.T) {
+	expected := documents()
+	mv := expected.Matview("doc_counts")
+	mv.Definition, mv.Comment = " SELECT status, count(*) AS n FROM docs GROUP BY status;", "Counts"
+	mv.Indexes["doc_counts_status_idx"] = "CREATE UNIQUE INDEX doc_counts_status_idx ON doc_counts USING btree (status)"
+	expected.Matview("weekly").Definition = " SELECT 1;"
+
+	actual := documents()
+	changed := actual.Matview("doc_counts")
+	changed.Definition = " SELECT status, count(*) AS n FROM docs WHERE status <> 'x' GROUP BY status;"
+	changed.Indexes["doc_counts_n_idx"] = "CREATE INDEX doc_counts_n_idx ON doc_counts USING btree (n)"
+	actual.Matview("old_report").Definition = " SELECT 2;"
+
+	want := []string{
+		"changed matview doc_counts",
+		"changed matview doc_counts comment",
+		"extra index doc_counts.doc_counts_n_idx",
+		"missing index doc_counts.doc_counts_status_idx",
+		"extra matview old_report",
+		"missing matview weekly",
+	}
+	if got := describe(Compare(expected, actual)); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("EXPECTED %v\nACTUAL: %v", want, got)
+	}
+}

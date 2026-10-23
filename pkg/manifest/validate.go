@@ -35,6 +35,7 @@ const (
 	KindView      FileKind = "view"
 	KindEnum      FileKind = "enum"
 	KindSequence  FileKind = "sequence"
+	KindMatview   FileKind = "matview"
 	KindChangeset FileKind = "changeset"
 )
 
@@ -91,7 +92,7 @@ var compileErr error
 func schemaFor(kind FileKind) (*jsonschema.Schema, error) {
 	compileOnce.Do(func() {
 		compiler := jsonschema.NewCompiler()
-		kinds := []FileKind{KindTable, KindView, KindEnum, KindSequence, KindChangeset}
+		kinds := []FileKind{KindTable, KindView, KindEnum, KindSequence, KindMatview, KindChangeset}
 		for _, k := range kinds {
 			name := fmt.Sprintf("%s.schema.json", k)
 			raw, err := schemaFiles.ReadFile("schemas/" + name)
@@ -139,6 +140,8 @@ func KindOf(path string) (FileKind, bool) {
 		return KindEnum, true
 	case strings.HasSuffix(base, "-sequence.json"):
 		return KindSequence, true
+	case strings.HasSuffix(base, "-matview.json"):
+		return KindMatview, true
 	case filepath.Ext(base) == ".json" && filepath.Base(filepath.Dir(path)) == "deltas":
 		return KindChangeset, true
 	}
@@ -201,6 +204,7 @@ var ruleMessages = map[string]string{
 	"#/$defs/columnDelta/allOf/1/else/not":     "mods is only used when the action is alter",
 	"#/$defs/commentDelta/else/not":            "reference is only used for a column comment - it names the column's table",
 	"#/$defs/enumDelta/else/not":               "value is only used when the action is alter - it names the value to add",
+	"#/$defs/matviewDelta/else/not":            "concurrently is only used when the action is refresh",
 }
 
 // leafIssues flattens the validation error tree into its leaves - the inner nodes only say which combination of
@@ -269,11 +273,11 @@ func jsonPointer(tokens []string) string {
 	return bld.String()
 }
 
-// StateFiles returns the table, view, enum and sequence state files in the working directory, the files a state build
-// applies
+// StateFiles returns the table, view, enum, sequence and materialized view state files in the working directory, the
+// files a state build applies
 func StateFiles(workdir string) ([]string, error) {
 	var files []string
-	for _, suffix := range []string{"-table.json", "-view.json", "-enum.json", "-sequence.json"} {
+	for _, suffix := range []string{"-table.json", "-view.json", "-enum.json", "-sequence.json", "-matview.json"} {
 		matches, err := filepath.Glob(filepath.Join(workdir, "state", "*"+suffix))
 		if err != nil {
 			return nil, err
@@ -307,7 +311,7 @@ func ValidateManifest(workdir string, errorsAfter *util.SemanticVersion) ([]File
 	for _, path := range allStateJson {
 		if _, ok := KindOf(path); !ok {
 			ignored := FileValidation{File: path, Issues: []ValidationIssue{{
-				Message: "not a table (<name>-table.json), view (<name>-view.json), enum (<name>-enum.json) or sequence (<name>-sequence.json) file - skima ignores it",
+				Message: "not a table (<name>-table.json), view (<name>-view.json), enum (<name>-enum.json), sequence (<name>-sequence.json) or materialized view (<name>-matview.json) file - skima ignores it",
 			}}}
 			ignored.finish()
 			results = append(results, ignored)
