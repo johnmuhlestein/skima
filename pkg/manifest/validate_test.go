@@ -180,6 +180,8 @@ func TestReadmeExamplesValid(t *testing.T) {
 		switch {
 		case doc["deltas"] != nil:
 			kind = KindChangeset
+		case doc["sql"] != nil && (doc["indexes"] != nil || doc["data"] != nil):
+			kind = KindMatview
 		case doc["sql"] != nil:
 			kind = KindView
 		case doc["values"] != nil:

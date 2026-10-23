@@ -1,4 +1,4 @@
-Plan for schema app1: deployed 1.0.0 -> 1.0.3 (3 changesets, 27 statements)
+Plan for schema app1: deployed 1.0.0 -> 1.0.3 (3 changesets, 32 statements)
 
 == changeset 1.0.1  deltas/v1_0_1.json  [transaction]
 -- tag documents and track their priority
@@ -61,6 +61,16 @@ create index concurrently if not exists tags_label_idx on tags (label);
 create or replace view project_documents (project_name,document_id,document_type) as select p.name, d.id, d.document_type from projects p join documents d on d.project_id = p.id;
 -- [3] comment view project_documents
 comment on view project_documents is 'Documents per project';
+-- [4] add matview document_counts  (tolerates 42P07, 42710)
+create materialized view if not exists document_counts (document_type,n) as select document_type, count(*) from documents group by document_type with data;
+-- [4] index document_counts.document_counts_type_idx
+create unique index if not exists document_counts_type_idx on document_counts (document_type);
+-- [4] comment matview document_counts
+comment on materialized view document_counts is 'Documents per type';
+-- [5] add view common_types  (tolerates 42P07, 42710)
+create or replace view common_types (document_type) as select document_type from document_counts where n > 1;
+-- [6] refresh matview document_counts (concurrently)  (tolerates 42P07, 42710)
+refresh materialized view concurrently document_counts;
 
 WARNING: deltas/v1_0_2.json#/deltas/8: changeset 1.0.2 adds the value 'blue' to enum tag_color in a transaction - postgres does not let the value be used until the changeset commits, so use it in a later changeset
 WARNING: changeset 1.0.3 runs without a transaction - a failure part way through leaves the earlier deltas in place

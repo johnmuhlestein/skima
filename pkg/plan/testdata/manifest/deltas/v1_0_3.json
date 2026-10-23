@@ -7,6 +7,9 @@
       "sql": ["create index concurrently if not exists tags_label_idx on tags (label)"]
     },
     { "object": "function", "action": "add", "name": "update_last_modified_at" },
-    { "object": "view", "action": "add", "name": "project_documents" }
+    { "object": "view", "action": "add", "name": "project_documents" },
+    { "object": "matview", "action": "add", "name": "document_counts" },
+    { "object": "view", "action": "add", "name": "common_types" },
+    { "object": "matview", "action": "refresh", "name": "document_counts", "concurrently": true }
   ]
 }

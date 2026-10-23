@@ -1,0 +1,5 @@
+{
+  "name" : "busy_tags",
+  "columns" : ["label"],
+  "sql" : "select label from tag_counts where n > 0"
+}

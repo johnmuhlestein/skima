@@ -78,7 +78,7 @@ func renderStep(w io.Writer, step Step, opts RenderOptions) {
 		notes = append(notes, "deferred to the end of the changeset")
 	}
 	if step.Retryable {
-		notes = append(notes, "retried if it depends on a view created after it")
+		notes = append(notes, "retried if it depends on a view or materialized view created after it")
 	}
 	if len(step.Tolerate) > 0 {
 		notes = append(notes, "tolerates "+strings.Join(step.Tolerate, ", "))

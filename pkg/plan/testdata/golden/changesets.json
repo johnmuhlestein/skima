@@ -334,6 +334,63 @@
           "sql": [
             "comment on view project_documents is 'Documents per project'"
           ]
+        },
+        {
+          "kind": "delta",
+          "describe": "add matview document_counts",
+          "source": "deltas/v1_0_3.json#/deltas/3",
+          "delta": 4,
+          "sql": [
+            "create materialized view if not exists document_counts (document_type,n) as select document_type, count(*) from documents group by document_type with data"
+          ],
+          "tolerate": [
+            "42P07",
+            "42710"
+          ]
+        },
+        {
+          "kind": "index",
+          "describe": "document_counts.document_counts_type_idx",
+          "source": "deltas/v1_0_3.json#/deltas/3",
+          "delta": 4,
+          "sql": [
+            "create unique index if not exists document_counts_type_idx on document_counts (document_type)"
+          ]
+        },
+        {
+          "kind": "comment",
+          "describe": "matview document_counts",
+          "source": "deltas/v1_0_3.json#/deltas/3",
+          "delta": 4,
+          "sql": [
+            "comment on materialized view document_counts is 'Documents per type'"
+          ]
+        },
+        {
+          "kind": "delta",
+          "describe": "add view common_types",
+          "source": "deltas/v1_0_3.json#/deltas/4",
+          "delta": 5,
+          "sql": [
+            "create or replace view common_types (document_type) as select document_type from document_counts where n \u003e 1"
+          ],
+          "tolerate": [
+            "42P07",
+            "42710"
+          ]
+        },
+        {
+          "kind": "delta",
+          "describe": "refresh matview document_counts (concurrently)",
+          "source": "deltas/v1_0_3.json#/deltas/5",
+          "delta": 6,
+          "sql": [
+            "refresh materialized view concurrently document_counts"
+          ],
+          "tolerate": [
+            "42P07",
+            "42710"
+          ]
         }
       ]
     }

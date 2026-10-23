@@ -35,6 +35,7 @@ Projects that describe a database schema should follow this simple structure:
 |   |   |-- documents-table.json
 |   |   |-- projects-table.json
 |   |   |-- invoice_no-sequence.json
+|   |   |-- doc_counts-matview.json
 ```
 Database objects are described using JSON for example a file named `documents-table.json` could look like the following:
 ```json
@@ -219,7 +220,8 @@ A delta can make the following types of changes
 * constraint - add, drop (valid for check and unique)
 * enum - add, drop, alter to add a value (see [Enum State File](#enum-state-file))
 * sequence - add, drop, alter (see [Sequence State File](#sequence-state-file))
-* comment - add, drop (on a table, column, view, enum or sequence - see [Comments](#comments))
+* matview - add, drop, refresh (see [Materialized View State File](#materialized-view-state-file))
+* comment - add, drop (on a table, column, view, enum, sequence or matview - see [Comments](#comments))
 * column - add, drop, rename, alter
 
 #### Transactions
@@ -324,10 +326,10 @@ Drift in schema app1 (deployed 1.0.3): 3 differences
 ```
 
 * Tables, columns (type, nullability, default, identity, generated, comment), primary key, unique, check and foreign
-  key constraints, indexes, triggers, views, enums (their values, in order), sequences (settings and owner) and table,
-  view, enum and sequence comments are compared. Sequences of identity columns are compared as the column, and a
-  sequence a column owns (e.g. a `serial` column's) is not reported as extra on its own. Functions, grants and data are
-  not
+  key constraints, indexes, triggers, views, materialized views (definition and indexes), enums (their values, in
+  order), sequences (settings and owner) and table, view, materialized view, enum and sequence comments are compared.
+  Sequences of identity columns are compared as the column, and a sequence a column owns (e.g. a `serial` column's) is
+  not reported as extra on its own. Functions, grants and data are not
 * Postgres rewrites definitions when it stores them (`varchar` becomes `character varying`, check constraints and views
   are reformatted), so drift does not compare the state files' text. It builds the state files into temporary tables
   in a transaction that is always rolled back and compares how postgres describes those with the real schema. It
@@ -532,6 +534,36 @@ sequence is created:
 }
 ```
 
+### Materialized View State File
+A materialized view is defined in `state/<name>-matview.json` like a view, with optional `indexes` (defined as on a
+table) and `data` - `false` creates it empty, until it is refreshed. A state build creates materialized views with the
+views, retrying either when it selects from one created after it:
+```json
+{
+  "name": "doc_counts",
+  "columns": ["status", "n"],
+  "sql": "select status, count(*) from documents group by status",
+  "indexes": [
+    { "name": "doc_counts_status_idx", "columns": ["status"], "unique": true }
+  ],
+  "comment": "Documents per status"
+}
+```
+A `matview` delta `add`s it with its indexes and comment, `drop`s it, or `refresh`es its data. `"concurrently": true`
+refreshes it without locking out reads - postgres needs a unique index on the materialized view for that, which
+validation checks. An `index` delta can add one of its indexes, with the materialized view as the `reference`. Postgres
+cannot change a materialized view's query - to change it, `drop` it and `add` it again:
+```json
+{
+  "version": "1.0.8",
+  "description": "count documents by status",
+  "deltas": [
+    { "object": "matview", "action": "add", "name": "doc_counts" },
+    { "object": "matview", "action": "refresh", "name": "doc_counts", "concurrently": true }
+  ]
+}
+```
+
 ### View State File
 A view has 3 attributes, and an optional `comment` (see [Comments](#comments))
 * name - the name of the view
@@ -613,7 +645,7 @@ This example would be the same for both `foreign-keys` (below) array within a Ta
 ```
 
 ### Comments
-Tables, columns, views, enums and sequences take an optional `comment`, which skima sets with `comment on`. The text is quoted for you -
+Tables, columns, views, materialized views, enums and sequences take an optional `comment`, which skima sets with `comment on`. The text is quoted for you -
 write it as plain text, apostrophes included:
 ```json
 {
@@ -627,8 +659,8 @@ write it as plain text, apostrophes included:
 ```
 A state build sets every comment, and a delta that adds a table, view or column sets the comments its state file
 gives it. To change a comment on an existing object, edit the state file and add a `comment` delta - `add` sets the
-comment from the state file, `drop` removes it. `on` is `table`, `column`, `view`, `enum` or `sequence`, and a column
-comment names its table in `reference`:
+comment from the state file, `drop` removes it. `on` is `table`, `column`, `view`, `matview`, `enum` or `sequence`, and
+a column comment names its table in `reference`:
 ```json
 {
   "version": "1.0.5",

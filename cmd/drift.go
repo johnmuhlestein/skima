@@ -26,11 +26,11 @@ var driftCmd = &cobra.Command{
   extra    the database has it, the state files do not define it
   changed  both have it, with different definitions - shown as expected and actual
 
-Tables, columns (type, nullability, default, identity, generated, comment), primary key, unique, check and foreign
-key constraints, indexes, triggers, views, enums (their values, in order), sequences (settings and owner) and table,
-view, enum and sequence comments are compared. Sequences of identity columns are compared as the column, and a
-sequence a column owns (e.g. a serial column's) is not reported as extra on its own. Functions, grants and data are
-not.
+Tables, columns (type, nullability, default, identity, generated, comment), primary key, unique, check and foreign key
+constraints, indexes, triggers, views, materialized views (definition and indexes), enums (their values, in order),
+sequences (settings and owner) and table, view, materialized view, enum and sequence comments are compared. Sequences of
+identity columns are compared as the column, and a sequence a column owns (e.g. a serial column's) is not reported as
+extra on its own. Functions, grants and data are not.
 
 Postgres rewrites definitions when it stores them (varchar is stored as character varying, and check constraints and
 views are reformatted), so drift does not compare the state files' text. It builds the state files into temporary

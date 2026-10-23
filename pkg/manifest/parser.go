@@ -148,6 +148,20 @@ type Sequence struct {
 	Comment string
 }
 
+// Matview is a materialized view - its query, indexes and comment
+type Matview struct {
+	Name    string
+	Columns []string
+	Sql     string
+	// Data is false to create it with no data - it is empty until refreshed
+	Data    *bool
+	Indexes []Index
+	Comment string
+}
+
+// MatviewShadowPrefix names the view that stands in for a materialized view's query in a shadow build - see ShadowDdl
+const MatviewShadowPrefix = "skima_matview_"
+
 type Hook struct {
 	Sql    []string
 	Script string
@@ -172,10 +186,12 @@ type SimpleDelta struct {
 	Name      string
 	Reference string
 	NewName   string
-	// On is what a comment delta comments on: table, column, view, enum or sequence
+	// On is what a comment delta comments on: table, column, view, enum, sequence or matview
 	On string
 	// Value is the value an enum alter delta adds
 	Value string
+	// Concurrently refreshes a materialized view without locking out reads
+	Concurrently bool
 	PrePostHook
 }
 
@@ -455,6 +471,53 @@ func (s Sequence) AlterDdl() string {
 		bld.WriteString(" owned by none")
 	}
 	return bld.String()
+}
+
+func ParseMatviewByName(name string) (Matview, error) {
+	path := filepath.Join(viper.GetString("workdir"), "state", fmt.Sprintf("%s-matview.json", name))
+	return ParseMatviewByPath(path)
+}
+
+func ParseMatviewByPath(path string) (Matview, error) {
+	entityBytes, err := reader.readFile(path)
+	if err != nil {
+		return Matview{}, err
+	}
+	mv := Matview{}
+	err = json.Unmarshal(entityBytes, &mv)
+	return mv, err
+}
+
+// GenerateDdl creates the materialized view, populated unless data is false - its indexes are created separately
+func (m Matview) GenerateDdl() string {
+	data := "with data"
+	if m.Data != nil && !*m.Data {
+		data = "with no data"
+	}
+	return fmt.Sprintf("create materialized view if not exists %s (%s) as %s %s", m.Name, strings.Join(m.Columns, ","), m.Sql, data)
+}
+
+// ShadowDdl stands in for the materialized view in a shadow build, which creates everything as temporary objects -
+// postgres does not allow a temporary materialized view. A temporary view under a scratch name has the same
+// definition, and an empty temporary table with the materialized view's name and columns takes its indexes and is
+// what other views select from
+func (m Matview) ShadowDdl() []string {
+	scratch := MatviewShadowPrefix + m.Name
+	return []string{
+		fmt.Sprintf("create or replace view %s (%s) as %s", scratch, strings.Join(m.Columns, ","), m.Sql),
+		fmt.Sprintf("create table %s as select * from %s with no data", m.Name, scratch),
+	}
+}
+
+// UniqueIndex reports whether the materialized view has a unique index on columns, with no where clause - which a
+// refresh concurrently needs. An index defined by its ddl is not checked, so it counts
+func (m Matview) UniqueIndex() bool {
+	for _, idx := range m.Indexes {
+		if idx.Ddl != "" || idx.Unique {
+			return true
+		}
+	}
+	return false
 }
 
 func ParseViewByName(name string) (View, error) {
@@ -800,17 +863,33 @@ func (sd SimpleDelta) Ddl() (string, error) {
 			return fmt.Sprintf(dropIndexTmpl, sd.Name), nil
 		case "add":
 			if len(sd.Reference) > 0 {
-				t, err := sd.referenceTable()
+				indexes, err := sd.referenceIndexes()
 				if err != nil {
 					return "", err
 				}
-				for _, idx := range t.Indexes {
+				for _, idx := range indexes {
 					if idx.Name == sd.Name {
 						return idx.GenerateDdl(sd.Reference), nil
 					}
 				}
 				return "", missingDefinition("Table %s did not have a index definition matching %s", sd.Reference, sd.Name)
 			}
+		}
+	case "matview":
+		switch sd.Action {
+		case "drop":
+			return fmt.Sprintf("drop materialized view if exists %s", sd.Name), nil
+		case "refresh":
+			if sd.Concurrently {
+				return fmt.Sprintf("refresh materialized view concurrently %s", sd.Name), nil
+			}
+			return fmt.Sprintf("refresh materialized view %s", sd.Name), nil
+		case "add":
+			mv, err := ParseMatviewByName(sd.Name)
+			if err != nil {
+				return "", fmt.Errorf("Unable to parse the materialized view %s: %w", sd.Name, err)
+			}
+			return mv.GenerateDdl(), nil
 		}
 	case "enum":
 		switch sd.Action {
@@ -920,8 +999,14 @@ func (sd SimpleDelta) stateComment() (string, error) {
 			return "", fmt.Errorf("Unable to parse the sequence %s: %w", sd.Name, err)
 		}
 		comment = seq.Comment
+	case "matview":
+		mv, err := ParseMatviewByName(sd.Name)
+		if err != nil {
+			return "", fmt.Errorf("Unable to parse the materialized view %s: %w", sd.Name, err)
+		}
+		comment = mv.Comment
 	default:
-		return "", missingDefinition("cannot comment on %q - use table, column, view, enum or sequence", sd.On)
+		return "", missingDefinition("cannot comment on %q - use table, column, view, enum, sequence or matview", sd.On)
 	}
 	if comment == "" {
 		return "", missingDefinition("%s %s has no comment in its state file", sd.On, sd.commentTarget())
@@ -939,16 +1024,19 @@ func (t Table) Column(name string) (Column, bool) {
 	return Column{}, false
 }
 
-// CommentDdl sets the comment on a table, column (target is table.column), view, enum or sequence - an empty comment
-// removes it.
+// CommentDdl sets the comment on a table, column (target is table.column), view, enum, sequence or matview - an empty
+// comment removes it.
 // The comment is quoted as a string literal
 func CommentDdl(on string, target string, comment string) string {
 	literal := "null"
 	if comment != "" {
 		literal = QuoteLiteral(comment)
 	}
-	if on == "enum" {
+	switch on {
+	case "enum":
 		on = "type" // an enum is a type to postgres
+	case "matview":
+		on = "materialized view"
 	}
 	return fmt.Sprintf("comment on %s %s is %s", on, target, literal)
 }
@@ -957,6 +1045,18 @@ func CommentDdl(on string, target string, comment string) string {
 // postgres 9.1) backslashes in a literal are ordinary characters, so only single quotes are doubled
 func QuoteLiteral(text string) string {
 	return "'" + strings.ReplaceAll(text, "'", "''") + "'"
+}
+
+// referenceIndexes returns the indexes of the reference table - or materialized view, when it has a state file instead
+func (sd SimpleDelta) referenceIndexes() ([]Index, error) {
+	t, err := sd.referenceTable()
+	if err == nil {
+		return t.Indexes, nil
+	}
+	if mv, mvErr := ParseMatviewByName(sd.Reference); mvErr == nil {
+		return mv.Indexes, nil
+	}
+	return nil, err
 }
 
 func (sd SimpleDelta) referenceTable() (Table, error) {
@@ -998,6 +1098,10 @@ func (sd SimpleDelta) Describe() string {
 	bld.WriteString(" ")
 	if sd.Object == "comment" {
 		fmt.Fprintf(&bld, "comment on %s ", sd.On)
+	}
+	if sd.Object == "matview" && sd.Action == "refresh" && sd.Concurrently {
+		fmt.Fprintf(&bld, "%s (concurrently)", sd.Name)
+		return bld.String()
 	}
 	if sd.Object == "enum" && sd.Action == "alter" {
 		fmt.Fprintf(&bld, "%s (add value %s)", sd.Name, QuoteLiteral(sd.Value))
