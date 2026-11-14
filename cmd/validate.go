@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"skima/pkg/manifest"
-	"skima/pkg/util"
 
+	"github.com/johnmuhlestein/skima/internal/manifest"
+	"github.com/johnmuhlestein/skima/internal/util"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )

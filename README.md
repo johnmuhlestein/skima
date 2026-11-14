@@ -511,11 +511,11 @@ INVALID  deltas/v1_4_3.json
 is invalid, nothing is applied. Changesets that were
 already applied are not checked, so an old file never blocks a deploy. Use `skima apply --skip-validation` to bypass the check.
 
-The schemas live in [`pkg/manifest/schemas`](pkg/manifest/schemas). To get completion and inline errors in an editor that
+The schemas live in [`schemas`](schemas). To get completion and inline errors in an editor that
 supports JSON schema, add a `$schema` property to a manifest file:
 ```
 {
-  "$schema": "https://raw.githubusercontent.com/johnmuhlestein/skima/main/pkg/manifest/schemas/table.schema.json",
+  "$schema": "https://raw.githubusercontent.com/johnmuhlestein/skima/main/schemas/table.schema.json",
   "name": "documents",
   ...
 }

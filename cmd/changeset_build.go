@@ -4,11 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"skima/pkg/changes"
-	"skima/pkg/editor"
-	"skima/pkg/manifest"
 	"slices"
 
+	"github.com/johnmuhlestein/skima/internal/changes"
+	"github.com/johnmuhlestein/skima/internal/editor"
+	"github.com/johnmuhlestein/skima/internal/manifest"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -226,7 +226,7 @@ func init() {
 	changesetBuildCmd.Flags().StringVar(&buildOptions.Version, "version", "", "An explicit version, e.g. 1.1.0 or 1.1.0-rc.1, instead of --bump")
 	changesetBuildCmd.Flags().BoolVar(&buildOptions.NoTransaction, "no-transaction", false, `Write "transaction": false, for statements that can't run in a transaction`)
 	changesetBuildCmd.Flags().BoolVar(&buildOptions.AcknowledgeUnsupported, "acknowledge-unsupported", false, "Build although some changes generate no deltas - add those deltas by hand")
-	changesetBuildCmd.MarkFlagRequired("description")
+	cobra.CheckErr(changesetBuildCmd.MarkFlagRequired("description"))
 	changesetBackfillCmd.Flags().StringVar(&backfillExpression, "expression", "", "A SQL expression to fill the column with")
 	changesetBackfillCmd.Flags().StringVar(&backfillScript, "script", "", "A sql file in deltas/scripts that fills the column")
 	changesetHintsCmd.Flags().BoolVar(&clearHints, "clear", false, "Remove every hint")

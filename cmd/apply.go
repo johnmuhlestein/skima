@@ -4,16 +4,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"skima/pkg/db"
-	"skima/pkg/manifest"
-	"skima/pkg/plan"
-	"skima/pkg/util"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/spf13/viper"
-
+	"github.com/johnmuhlestein/skima/internal/db"
+	"github.com/johnmuhlestein/skima/internal/manifest"
+	"github.com/johnmuhlestein/skima/internal/plan"
+	"github.com/johnmuhlestein/skima/internal/util"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 var bootstrap bool
@@ -116,7 +115,7 @@ This does the following:
 				// changesets take their definitions from the state files, so those are validated too
 				validateBeforeApply(pendingChangesets(hist.SchemaVersion))
 				failures = executeChangesets(hist.SchemaVersion)
-			case db.NoHistTable:
+			case db.ErrNoHistTable:
 				validateBeforeApply(nil)
 				p := mustPlan(plan.ForState(viper.GetBool("state.transaction")))
 				fmt.Println("Schema is not yet managed by skima - creating the history tables")
@@ -168,9 +167,9 @@ func init() {
 	applyCmd.Flags().BoolVar(&skipValidation, "skip-validation", false, "Apply without first validating the manifest files against the skima JSON schemas")
 	applyCmd.Flags().BoolVar(&statesql, "sql", false, "Only apply the sql files that are part of the state definition")
 	applyCmd.Flags().Bool("state-transaction", true, "Apply the state build (and --sql) in a single transaction - set to false when a state sql file cannot run inside a transaction - overrides the config file value")
-	viper.BindPFlag("state.transaction", applyCmd.Flags().Lookup("state-transaction"))
+	cobra.CheckErr(viper.BindPFlag("state.transaction", applyCmd.Flags().Lookup("state-transaction")))
 	applyCmd.Flags().Duration("lock-timeout", 5*time.Minute, "How long to wait for another apply against the schema to finish (e.g. 30s, 15m) - 0 waits indefinitely - overrides the config file value")
-	viper.BindPFlag("lock.timeout", applyCmd.Flags().Lookup("lock-timeout"))
+	cobra.CheckErr(viper.BindPFlag("lock.timeout", applyCmd.Flags().Lookup("lock-timeout")))
 	for _, flag := range []string{"bootstrap", "hist", "baseline", "sql"} {
 		applyCmd.MarkFlagsMutuallyExclusive("dry-run", flag)
 	}

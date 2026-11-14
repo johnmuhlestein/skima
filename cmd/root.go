@@ -18,9 +18,7 @@ var rootCmd = &cobra.Command{
 	Short: "Database schema management tool",
 	Long: `Tool for managing schema definition, deployment of both
 from scratch databases and deltas over time in an existing database.`,
-	// Uncomment the following line if your bare application
-	// has an action associated with it:
-	// Run: func(cmd *cobra.Command, args []string) { },
+	Version: versionString(),
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -39,7 +37,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.skima.yaml)")
 	rootCmd.PersistentFlags().StringVar(&output, "output", "", "The output format - default is plain, human readable texts. For those commands where it makes sense/is documented, you can also have the output in json format")
 	rootCmd.PersistentFlags().StringP("workdir", "w", "", "The manifest working directory containing the state and deltas directories - overrides the config file value")
-	viper.BindPFlag("workdir", rootCmd.PersistentFlags().Lookup("workdir"))
+	cobra.CheckErr(viper.BindPFlag("workdir", rootCmd.PersistentFlags().Lookup("workdir")))
 	rootCmd.PersistentFlags().String("dbconnstring", "", "The connection string for the database instance - should not include database name, port, schema, username or pwd -  - overrides the config file value")
 	rootCmd.PersistentFlags().Int("dbport", 0, "The database port to connect to - overrides the config file value")
 	rootCmd.PersistentFlags().String("dbdb", "", "The database name within the instance to connect to - overrides the config file value")
@@ -49,14 +47,14 @@ func init() {
 	rootCmd.PersistentFlags().String("dbsuperuser", "", "The superuser for the database - unlike the standard user, this user can work across all schemas including the public schema (required if dbusernamepwd is set")
 	rootCmd.PersistentFlags().String("dbsuperuserpwd", "", "Password for the database superuser (required if dbusername is set")
 	rootCmd.MarkFlagsRequiredTogether("dbsuperuser", "dbsuperuserpwd")
-	viper.BindPFlag("dbconn.connstring", rootCmd.PersistentFlags().Lookup("dbconnstring"))
-	viper.BindPFlag("dbconn.port", rootCmd.PersistentFlags().Lookup("dbport"))
-	viper.BindPFlag("dbconn.database", rootCmd.PersistentFlags().Lookup("dbdb"))
-	viper.BindPFlag("dbconn.schema", rootCmd.PersistentFlags().Lookup("dbschema"))
-	viper.BindPFlag("dbconn.username", rootCmd.PersistentFlags().Lookup("dbusername"))
-	viper.BindPFlag("dbconn.password", rootCmd.PersistentFlags().Lookup("dbpassword"))
-	viper.BindPFlag("dbconn.superuser", rootCmd.PersistentFlags().Lookup("dbsuperuser"))
-	viper.BindPFlag("dbconn.superuserpwd", rootCmd.PersistentFlags().Lookup("dbsuperuserpwd"))
+	cobra.CheckErr(viper.BindPFlag("dbconn.connstring", rootCmd.PersistentFlags().Lookup("dbconnstring")))
+	cobra.CheckErr(viper.BindPFlag("dbconn.port", rootCmd.PersistentFlags().Lookup("dbport")))
+	cobra.CheckErr(viper.BindPFlag("dbconn.database", rootCmd.PersistentFlags().Lookup("dbdb")))
+	cobra.CheckErr(viper.BindPFlag("dbconn.schema", rootCmd.PersistentFlags().Lookup("dbschema")))
+	cobra.CheckErr(viper.BindPFlag("dbconn.username", rootCmd.PersistentFlags().Lookup("dbusername")))
+	cobra.CheckErr(viper.BindPFlag("dbconn.password", rootCmd.PersistentFlags().Lookup("dbpassword")))
+	cobra.CheckErr(viper.BindPFlag("dbconn.superuser", rootCmd.PersistentFlags().Lookup("dbsuperuser")))
+	cobra.CheckErr(viper.BindPFlag("dbconn.superuserpwd", rootCmd.PersistentFlags().Lookup("dbsuperuserpwd")))
 
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.

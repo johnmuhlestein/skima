@@ -6,8 +6,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-var listArg bool
-
 // manifestCmd represents the manifest command
 var manifestCmd = &cobra.Command{
 	Use:   "manifest",
@@ -33,13 +31,4 @@ Example:
 func init() {
 	rootCmd.AddCommand(manifestCmd)
 
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// the --workdir flag is defined on the root command so every command can use it
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	//manifestCmd.Flags().BoolVarP(&listArg, "list", "l", false, "list manifest files")
 }

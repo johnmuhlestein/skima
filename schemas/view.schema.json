@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/johnmuhlestein/skima/main/schemas/view.schema.json",
+  "title": "skima view definition",
+  "description": "A view state file (state/<name>-view.json)",
+  "type": "object",
+  "required": ["name", "columns", "sql"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "name": { "$ref": "table.schema.json#/$defs/name" },
+    "columns": {
+      "$ref": "table.schema.json#/$defs/nameList",
+      "description": "The view's column names - must match the number of columns the sql selects"
+    },
+    "sql": { "type": "string", "minLength": 1 },
+    "comment": { "$ref": "table.schema.json#/$defs/comment" }
+  }
+}

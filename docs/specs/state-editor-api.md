@@ -30,7 +30,7 @@ way to edit, not the only way.
 - `skima serve`: a local HTTP server exposing the API below
 - Read every state object (all six kinds)
 - Incremental edits to tables: create/drop tables; add/alter/rename/drop columns; primary key; foreign keys; indexes; constraints; triggers; table and column comments
-- Detect changes against the baseline and generate the changeset deltas, with warnings and the SQL preview from `pkg/plan`
+- Detect changes against the baseline and generate the changeset deltas, with warnings and the SQL preview from `internal/plan`
 - Build: write the next `deltas/v*.json`
 - Verify: prove a generated changeset against a database (`POST /changes/verify`, `skima changeset diff --verify`)
 - CLI equivalents of the change detection and build (`skima changeset diff|build`), sharing the same engine
@@ -266,7 +266,7 @@ must be dropped before and added after (by hand while views generate no deltas).
 ## Verify (needs a database)
 
 `POST /changes/verify` (and `skima changeset diff --verify`) proves the generated changeset is right, using
-`pkg/drift`'s comparison. It builds the baseline state and applies the generated changeset on top, builds the current
+`internal/drift`'s comparison. It builds the baseline state and applies the generated changeset on top, builds the current
 state directly, and compares the two schemas. Any difference means the generator (or a hand-written part of the
 changeset) is wrong; a changeset that fails to apply to the baseline is reported with the failing statement. It
 changes nothing and takes no apply lock.
@@ -309,15 +309,15 @@ useful in CI to catch a state edit pushed without its changeset.
 ## Implementation plan
 
 Packages:
-- `pkg/editor` — load state objects with ETags, apply table edits, cascade renames, validate, write canonically
-- `pkg/changes` — baseline from git, diff, hint reconciliation, delta generation, ordering, warnings
-- `pkg/server` — HTTP handlers, error mapping, Host check, OpenAPI document
+- `internal/editor` — load state objects with ETags, apply table edits, cascade renames, validate, write canonically
+- `internal/changes` — baseline from git, diff, hint reconciliation, delta generation, ordering, warnings
+- `internal/server` — HTTP handlers, error mapping, Host check, OpenAPI document
 - `cmd/serve.go`, `cmd/changeset.go`, `cmd/fmt.go`
 
 Milestones, each a PR:
-1. **Editor and canonical format** — `pkg/editor`, `skima manifest fmt`
-2. **Change detection and build** — `pkg/changes`, `skima changeset diff|build`
-3. **Server** — `pkg/server`, `skima serve`, OpenAPI
+1. **Editor and canonical format** — `internal/editor`, `skima manifest fmt`
+2. **Change detection and build** — `internal/changes`, `skima changeset diff|build`
+3. **Server** — `internal/server`, `skima serve`, OpenAPI
 4. **Verify** — `POST /changes/verify` and `skima changeset diff --verify`
 5. **Hand-edited changesets** — `POST /changesets/{name}/verify` and `skima changeset verify`
 
