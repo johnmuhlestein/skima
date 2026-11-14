@@ -1,0 +1,13 @@
+# the binary from go build / make build
+/skima
+/dist/
+*.test
+coverage.out
+coverage.html
+
+# skima's local draft state (skima also writes .skima/.gitignore)
+.skima/
+
+.idea/
+.vscode/
+.DS_Store

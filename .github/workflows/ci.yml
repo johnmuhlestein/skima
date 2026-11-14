@@ -36,8 +36,24 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      - name: go test
-        run: go test ./...
+      - name: go test (race detector)
+        run: go test -race ./...
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # the latest Go: golangci-lint v2.15.0 needs go >= 1.26 to build, newer than the module's minimum
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+
+      # the pinned version in the Makefile - the same lint as make lint locally
+      - name: golangci-lint
+        run: make lint
 
   docker:
     name: Docker build
@@ -91,7 +107,7 @@ jobs:
           SKM_DBCONN_SCHEMA: public
           SKM_DBCONN_USERNAME: postgres
           SKM_DBCONN_PASSWORD: postgres
-        run: go test -count=1 -v ./pkg/verify
+        run: go test -count=1 -v ./internal/verify
 
       - name: Bootstrap schema
         run: ./skima apply --bootstrap

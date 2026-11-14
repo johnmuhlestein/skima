@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"skima/pkg/db"
-	"skima/pkg/manifest"
-	"skima/pkg/plan"
-	"skima/pkg/util"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/johnmuhlestein/skima/internal/db"
+	"github.com/johnmuhlestein/skima/internal/manifest"
+	"github.com/johnmuhlestein/skima/internal/plan"
+	"github.com/johnmuhlestein/skima/internal/util"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -115,7 +115,7 @@ func deployedVersion(from string) (util.SemanticVersion, bool) {
 	switch err {
 	case nil:
 		return hist.SchemaVersion, true
-	case db.NoHistTable, pgx.ErrNoRows:
+	case db.ErrNoHistTable, pgx.ErrNoRows:
 		return util.SemanticVersion{}, false
 	default:
 		fmt.Fprintln(os.Stderr, "Unable to retrieve the apply history:", err)

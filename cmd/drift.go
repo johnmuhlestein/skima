@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"skima/pkg/db"
-	"skima/pkg/drift"
-	"skima/pkg/plan"
-	"skima/pkg/util"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/johnmuhlestein/skima/internal/db"
+	"github.com/johnmuhlestein/skima/internal/drift"
+	"github.com/johnmuhlestein/skima/internal/plan"
+	"github.com/johnmuhlestein/skima/internal/util"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -68,7 +68,7 @@ Example:
 			for _, path := range pendingChangesets(hist.SchemaVersion) {
 				report.Pending = append(report.Pending, util.ExtractVersion(filepath.Base(path)).String())
 			}
-		case db.NoHistTable, pgx.ErrNoRows:
+		case db.ErrNoHistTable, pgx.ErrNoRows:
 			// not managed by skima yet, e.g. before a baseline - it can still be compared with the state files
 		default:
 			fmt.Fprintln(os.Stderr, "Unable to retrieve the apply history:", err)

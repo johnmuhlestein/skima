@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"skima/pkg/changes"
-	"skima/pkg/drift"
-	"skima/pkg/verify"
 	"strings"
 
+	"github.com/johnmuhlestein/skima/internal/changes"
+	"github.com/johnmuhlestein/skima/internal/drift"
+	"github.com/johnmuhlestein/skima/internal/verify"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )

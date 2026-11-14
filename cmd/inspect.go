@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"skima/pkg/db"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/johnmuhlestein/skima/internal/db"
 	"github.com/spf13/cobra"
 )
 
@@ -47,7 +47,7 @@ func init() {
 
 func retrieveHist() {
 	applyHist, err := db.GetApplyHistory()
-	if err == db.NoHistTable {
+	if err == db.ErrNoHistTable {
 		fmt.Println("Schema is not managed by skima - run 'skima apply' to deploy it, or 'skima apply --hist' to only create the history tables")
 	} else if err == pgx.ErrNoRows {
 		fmt.Println("No successful builds found")

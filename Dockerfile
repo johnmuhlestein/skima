@@ -8,10 +8,13 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY main.go ./
-COPY pkg pkg
 COPY cmd cmd
+COPY internal internal
+COPY schemas schemas
 
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/skima .
+# the image has no git metadata, so the version is passed in: docker build --build-arg VERSION=v1.2.3
+ARG VERSION=""
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/johnmuhlestein/skima/cmd.version=${VERSION}" -o /out/skima .
 
 FROM public.ecr.aws/docker/library/alpine:3.22
 

@@ -1,4 +1,4 @@
-module skima
+module github.com/johnmuhlestein/skima
 
 go 1.25.0
 

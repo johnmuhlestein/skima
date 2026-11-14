@@ -8,11 +8,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"skima/pkg/server"
 	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/johnmuhlestein/skima/internal/server"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
