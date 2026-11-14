@@ -241,7 +241,9 @@ so nothing is silently left out of the changeset:
 ### Warnings
 
 Generated deltas carry warnings rather than being blocked: destructive drops, type changes, `NOT NULL` on existing
-columns, plain `NOT NULL` adds without a backfill, likely renames without a hint, and dropped hints.
+columns, plain `NOT NULL` adds without a backfill, likely renames without a hint, and dropped hints. Postgres refuses to
+change a column's type, or drop a column or table, while a view depends on it - those changes also warn that the view
+must be dropped before and added after (by hand while views generate no deltas).
 
 ## Building the changeset
 

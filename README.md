@@ -347,6 +347,35 @@ Drift in schema app1 (deployed 1.0.3): 3 differences
   ```
 * `--output=json` gives machine readable results. With `--detailed-exitcode` the exit code is 2 when there is drift
 
+### Generating changesets
+Instead of writing a changeset by hand, change the state files and let skima work out the deltas.
+`skima changeset diff` compares the state files with a baseline - the state files at a git commit, by default the last
+commit that changed `deltas/` - and shows what changed, the changeset deltas that make those changes, warnings for
+anything risky, and the SQL the changeset would run. Nothing is written.
+
+```
+skima changeset diff                         # compare with the last commit that changed deltas/
+skima changeset diff --baseline origin/main  # compare with another git ref
+skima changeset diff --output=json
+skima changeset diff --check                 # exit 1 when the state changed - for CI
+```
+
+Tables, columns, primary keys, foreign keys, indexes, constraints, triggers and table and column comments generate
+deltas, in an order that works: dependents are dropped first and added last, and destructive drops come at the end.
+Changes to views, enums, sequences, materialized views and state SQL files are listed as unsupported - write those
+deltas by hand for now.
+
+Warnings flag dropped tables and columns (their data is lost), datatype changes, columns made `NOT NULL`, new
+`NOT NULL` columns with no default (adding one fails on a table with rows), and changes postgres refuses while a view
+depends on the column or table.
+
+A diff can't infer some intent, so skima keeps it as hints in `.skima/draft.json` (git-ignored):
+* **renames** - a renamed column looks like a dropped and an added one, which would lose its data. With a rename hint
+  the changeset renames it. Without one, a column dropped and another of the same datatype added on the same table gets
+  a warning that it looks like a rename
+* **backfills** - a new `NOT NULL` column on a table with rows is added as nullable, filled from a SQL expression or a
+  script in `deltas/scripts`, then made `NOT NULL`
+
 ### Formatting the state files
 `skima manifest fmt` rewrites state files in one canonical format: 2-space indent, properties in the order this README
 documents them, optional properties left out when unset, and `nullable` always written. Formatting never changes what a
