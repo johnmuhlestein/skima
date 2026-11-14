@@ -284,3 +284,47 @@ func TestVerifyHandEditedChangeset(t *testing.T) {
 		t.Errorf("EXPECTED an InvalidChangesetError  ACTUAL: %v", err)
 	}
 }
+
+// names that are postgres keywords are quoted in every generated statement - tables user and order, keyword columns,
+// keys, an index, a constraint, a comment, a rename and a backfill
+func TestVerifyKeywordNames(t *testing.T) {
+	database(t)
+	workdir, baseline := fixture(t)
+	e := &edits{t: t, ed: editor.New(workdir)}
+	e.must(e.ed.CreateTable(manifest.Table{Name: "user", Comment: "a keyword table",
+		Columns:     []manifest.Column{{Name: "id", Datatype: "integer"}, {Name: "group", Datatype: "text", Nullable: true, Comment: "a keyword column"}},
+		PrimaryKey:  []string{"id"},
+		Indexes:     []manifest.Index{{Name: "user_group_idx", Columns: []string{"group"}}},
+		Constraints: []manifest.Constraint{{Name: "user_group_unq", Type: "unique", Columns: []string{"group"}}}}))
+	e.must(e.ed.CreateTable(manifest.Table{Name: "order",
+		Columns:     []manifest.Column{{Name: "id", Datatype: "integer"}, {Name: "user", Datatype: "integer", Nullable: true}},
+		PrimaryKey:  []string{"id"},
+		ForeignKeys: []manifest.ForeignKey{{Name: "order_user_fk", Columns: []string{"user"}, Reference: manifest.PrimaryKeyRef{Table: "user", Columns: []string{"id"}}}}}))
+	expectVerified(t, workdir, baseline, e.draft)
+
+	// changes to the keyword tables, measured from a baseline that has them
+	commit(t, workdir, "keyword tables")
+	baseline, err := changes.ResolveBaseline(workdir, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.draft = changes.Draft{}
+	e.must(e.ed.RenameColumn("user", e.etag("user"), "group", "select"))
+	e.must(e.ed.AddColumn("order", e.etag("order"), manifest.Column{Name: "limit", Datatype: "integer"}))
+	e.draft.RecordBackfill(changes.BackfillHint{Table: "order", Column: "limit", Expression: "10"})
+	e.must(e.ed.AlterColumn("order", e.etag("order"), "user", editor.ColumnChanges{Nullable: boolean(false)}))
+	e.must(e.ed.PutIndex("order", e.etag("order"), manifest.Index{Name: "order_limit_idx", Columns: []string{"limit"}}))
+	e.must(e.ed.DropConstraint("user", e.etag("user"), "user_group_unq"))
+	expectVerified(t, workdir, baseline, e.draft)
+}
+
+func commit(t *testing.T, workdir string, message string) {
+	t.Helper()
+	for _, args := range [][]string{{"add", "."}, {"commit", "-q", "-m", message}} {
+		cmd := exec.Command("git", append([]string{"-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"}, args...)...)
+		cmd.Dir = workdir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s", args, out)
+		}
+	}
+}

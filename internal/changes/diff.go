@@ -202,7 +202,8 @@ func (g *generator) compareTable(name string, base manifest.Table, current manif
 			if backfill.Script != "" {
 				fill.Script = backfill.Script
 			} else {
-				fill.Sql = []string{fmt.Sprintf("update %s set %s = %s where %s is null", name, c.Name, backfill.Expression, c.Name)}
+				column := manifest.QuoteIdent(c.Name)
+				fill.Sql = []string{fmt.Sprintf("update %s set %s = %s where %s is null", manifest.QuoteIdent(name), column, backfill.Expression, column)}
 			}
 			g.delta(phaseAddColumns, fill)
 			g.delta(phaseAddColumns, Delta{Object: "column", Action: "alter", Name: c.Name, Reference: name, Mods: &Mods{Nullable: true}})
