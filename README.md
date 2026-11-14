@@ -394,6 +394,37 @@ A diff can't infer some intent, so skima keeps it as hints in `.skima/draft.json
 
 `skima changeset hints` lists the recorded hints, and `--clear` removes them.
 
+### The state editor API
+`skima serve` starts a local HTTP API for the working directory's state files, for tools and (later) a UI: read every
+state object, edit tables, see the pending changes, and build the changeset - the same engine as `skima changeset`.
+
+```
+skima serve                       # http://127.0.0.1:7012/api/v1
+skima serve --port 8080 --baseline origin/main
+```
+
+| Endpoint | Does |
+|---|---|
+| `GET /api/v1/state/{tables,views,enums,sequences,matviews}[/{name}]` | List the objects of a kind, or read one's file - with its `ETag` |
+| `POST /api/v1/state/tables`, `PATCH`/`DELETE /api/v1/state/tables/{table}` | Create a table, set its comment, drop it |
+| `POST /api/v1/state/tables/{table}/columns`, `PATCH`/`DELETE .../columns/{column}` | Add, change or rename (`{"name": ...}`), drop a column |
+| `PUT`/`DELETE .../primary-key`, `.../{foreign-keys,indexes,constraints,triggers}/{name}` | Set or drop the primary key and the table's other objects |
+| `GET /api/v1/changes`, `GET`/`DELETE /api/v1/changes/hints[/{id}]` | The changes since the baseline with their deltas and SQL; the recorded hints |
+| `POST /api/v1/changesets` | Write the next changeset (`{"description": ...}`) |
+| `GET /api/v1/manifest`, `GET /api/v1/validation` | A summary of the manifest; validation results |
+
+The full description is at `/api/v1/openapi.json`. Request and response bodies use the state file format.
+
+* Every edit is validated before it is written - an edit that would make the state invalid is rejected with the problems
+  (`422`) - and only the files it changes are written, in the canonical format. Run `skima manifest fmt` once first.
+* Edits need the `ETag` of what was read in an `If-Match` header (`428` without it), and fail with `412` if the file
+  changed since - e.g. it was edited by hand.
+* Dropping something other objects use is rejected with what uses them (`409`), unless the request has `?cascade=true`.
+* Renaming a column through the API, or adding a `NOT NULL` column with `"backfill": {"expression": ...}` (or `"script"`),
+  records the hint the changeset needs.
+* The API has no authentication: it binds to `127.0.0.1` and only serves requests addressed to `localhost`, `127.0.0.1` or
+  `[::1]`. `--cors-origin` allows a browser UI at another origin to call it.
+
 ### Formatting the state files
 `skima manifest fmt` rewrites state files in one canonical format: 2-space indent, properties in the order this README
 documents them, optional properties left out when unset, and `nullable` always written. Formatting never changes what a
