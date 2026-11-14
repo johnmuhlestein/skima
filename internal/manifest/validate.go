@@ -401,7 +401,7 @@ func validateFiles(workdir string, stateFiles []string, changesets []string, all
 		if errorsAfter != nil && util.ExtractVersion(filepath.Base(path)).Compare(*errorsAfter) > 0 {
 			severity = SeverityError
 		}
-		checkChangesetName(&result, allDeltaFiles)
+		checkChangesetName(&result, allDeltaFiles, severity)
 		checkChangesetReferences(&result, index, workdir, severity)
 		result.finish()
 		results = append(results, result)

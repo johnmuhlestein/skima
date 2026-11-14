@@ -40,7 +40,7 @@ type fakeHistory struct {
 
 func (h *fakeHistory) record(history *ApplyHistory, stmtType string, status string, desc string) (int, error) {
 	h.rows = append(h.rows, row{stmtType, status, desc})
-	if status != "success" {
+	if status == "failed" {
 		history.Status = "failed" // as recordStatementHist does
 	}
 	return len(h.rows), nil
@@ -183,8 +183,8 @@ func TestViewRetries(t *testing.T) {
 	if failures != 0 || strings.Join(ex.executed, ",") != "first,second,first,seed" {
 		t.Errorf("EXPECTED the view to be retried before the post sql  ACTUAL: %d failures, executed %v", failures, ex.executed)
 	}
-	if hist.count("failed") != 1 || hist.count("success") != 3 {
-		t.Errorf("EXPECTED the failed first attempt and 3 successes to be recorded  ACTUAL: %v", hist.rows)
+	if hist.count("failed") != 0 || hist.count("retrying") != 1 || hist.count("success") != 3 {
+		t.Errorf("EXPECTED the retried first attempt and 3 successes recorded, nothing failed  ACTUAL: %v", hist.rows)
 	}
 
 	// a view's comment is retried with its view
@@ -198,9 +198,12 @@ func TestViewRetries(t *testing.T) {
 
 	// a view that never resolves is retried until a pass makes no progress
 	missing := []error{pgError("42P01"), pgError("42P01"), pgError("42P01")}
-	failures, ex, _, _ = execute([]plan.Step{viewStep("orphan")}, map[string][]error{"orphan": missing})
+	failures, ex, hist, history := execute([]plan.Step{viewStep("orphan")}, map[string][]error{"orphan": missing})
 	if failures != 1 || len(ex.executed) != 2 {
 		t.Errorf("EXPECTED one retry of an unresolvable view and 1 failure  ACTUAL: %d failures, executed %v", failures, ex.executed)
+	}
+	if hist.count("retrying") != 2 || hist.count("failed") != 1 || history.Status != "failed" {
+		t.Errorf("EXPECTED both attempts recorded as retrying, then the view as failed  ACTUAL: %v (run %s)", hist.rows, history.Status)
 	}
 
 	// other failures are not retried

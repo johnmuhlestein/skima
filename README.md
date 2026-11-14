@@ -534,6 +534,9 @@ skima records every apply run in two tables in the managed schema
 The most recent run with a `success` (or `complete` for a baseline) status determines the currently deployed version. An `apply --sql` run is
 not counted - it reruns the state sql files but applies no changesets. A changeset
 that failed and was rolled back is recorded as `rolled back`, and the statements it had already run are marked `rolled back` too.
+A view that references a relation not created yet is retried once the rest of its pass has run: its first attempt is
+recorded as `retrying`, followed by a `success` row - or a `failed` row if it still can't be created. `skima inspect`
+shows the most recent successful run and its statements.
 
 Only one `skima apply` runs against a schema at a time. Each apply takes a postgres advisory lock for the schema, so if two deploy jobs
 start together the second waits for the first to finish, then applies only what is still missing.

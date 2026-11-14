@@ -259,3 +259,27 @@ func TestFunctionFileLookup(t *testing.T) {
 		}
 	}
 }
+
+// the file name is the version applied, so a "version" property that disagrees is reported - a warning in history,
+// an error in a changeset about to be applied
+func TestChangesetVersionProperty(t *testing.T) {
+	reader = osReadWrapper{}
+	workdir := writeManifest(t, map[string]string{
+		"deltas/v1_0_1.json": `{"version":"1.0.1","deltas":[]}`,
+		"deltas/v1_0_2.json": `{"version":"1.0.3","deltas":[]}`,
+		"deltas/v1_0_4.json": `{"version":"v1_0_4","deltas":[]}`,
+	})
+	results, err := ValidateManifest(workdir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectIssues(t, results, "v1_0_1.json")
+	expectIssues(t, results, "v1_0_2.json", "warning /version: says 1.0.3, but the file name makes it 1.0.2")
+	expectIssues(t, results, "v1_0_4.json")
+
+	results, err = ValidateForApply(workdir, []string{filepath.Join(workdir, "deltas", "v1_0_2.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectIssues(t, results, "v1_0_2.json", "error /version: says 1.0.3")
+}

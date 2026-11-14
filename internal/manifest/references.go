@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -167,9 +168,10 @@ func checkStateReferences(result *FileValidation, index stateIndex) {
 	}
 }
 
-// checkChangesetName checks that a changeset's file name is a version, and that no other changeset has the same
+// checkChangesetName checks that a changeset's file name is a version, that a "version" property in the file agrees
+// with it (the file name is the version applied - severity for a disagreement), and that no other changeset has the same
 // version - only one of them would ever be applied
-func checkChangesetName(result *FileValidation, allDeltaFiles []string) {
+func checkChangesetName(result *FileValidation, allDeltaFiles []string, severity string) {
 	if filepath.Base(filepath.Dir(result.File)) != "deltas" {
 		return // e.g. a proposed changeset validated with --type before it is added to the manifest
 	}
@@ -179,6 +181,16 @@ func checkChangesetName(result *FileValidation, allDeltaFiles []string) {
 		return
 	}
 	version := util.ExtractVersion(base)
+	if content, err := os.ReadFile(result.File); err == nil {
+		var declared struct {
+			Version *string `json:"version"`
+		}
+		if json.Unmarshal(content, &declared) == nil && declared.Version != nil &&
+			util.ExtractVersion(*declared.Version).Compare(version) != 0 {
+			result.addIssue(severity, "/version", "says %s, but the file name makes it %s - the file name is the version applied, so fix or remove the version property",
+				*declared.Version, version.String())
+		}
+	}
 	for _, other := range allDeltaFiles {
 		if filepath.Base(other) != base && changesetNamePattern.MatchString(filepath.Base(other)) && util.ExtractVersion(filepath.Base(other)).Compare(version) == 0 {
 			result.addIssue(SeverityError, "", "has the same version (%s) as %s - only one of them would be applied", version.String(), filepath.Base(other))

@@ -373,7 +373,7 @@ func recordStatementHist(history *ApplyHistory, stmtType string, status string, 
 	err = conn.QueryRow(context.Background(), histStmtInsert, history.RunId, stmtType, status, desc).Scan(&stmtId)
 	stmtHist := ApplyStatement{StatementId: stmtId, StatementType: stmtType, Status: status, Description: desc}
 	history.Statements = append(history.Statements, stmtHist)
-	if status != "success" {
+	if status == "failed" {
 		history.Status = "failed"
 	}
 	return stmtId, err
@@ -508,8 +508,6 @@ func GetApplyHistory() (ApplyHistory, error) {
 		}
 	case pgx.ErrNoRows:
 		return hist, ErrNoHistTable
-	default:
-		fmt.Println("Unexpected error occurred")
 	}
 	return hist, err
 }
