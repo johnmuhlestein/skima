@@ -297,6 +297,12 @@ func ForChangesets(deployed util.SemanticVersion) (Plan, error) {
 	return p, nil
 }
 
+// ForChangesetFile plans one changeset file, wherever it is - e.g. a changeset that has not been added to the manifest
+// yet. Its deltas read their definitions from the configured working directory's state files, like apply's do
+func ForChangesetFile(path string) (Unit, []string, error) {
+	return changesetUnit(path)
+}
+
 func changesetUnit(path string) (Unit, []string, error) {
 	file := relative(path)
 	cs, err := manifest.ParseChangeSet(path)
