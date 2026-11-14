@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"skima/pkg/changes"
 	"skima/pkg/drift"
 	"skima/pkg/verify"
@@ -29,7 +31,8 @@ the schema to. Use --baseline to compare with another git ref, e.g. origin/main.
 git repository.
 
 A diff can't tell a renamed column from a dropped and an added one, or how to fill a new NOT NULL column on a table
-that has rows. That intent is kept as hints in .skima/draft.json, which skima git-ignores.`,
+that has rows. That intent is kept as hints in .skima/draft.json, which skima git-ignores. For any other intent, edit the
+file skima changeset build writes and prove the edit with skima changeset verify.`,
 }
 
 // changesetDiffCmd represents the changeset diff command
@@ -110,8 +113,86 @@ Example:
 	},
 }
 
+// changesetVerifyCmd represents the changeset verify command
+var changesetVerifyCmd = &cobra.Command{
+	Use:   "verify [changeset]",
+	Short: "Proves a changeset not committed yet against the database - e.g. one edited by hand after changeset build.",
+	Long: `Proves a changeset file against the database configured for skima, as changeset diff --verify proves the
+generated one: the baseline's state files are built and the changeset applied on top, and the result must be exactly
+what the current state files build. The exit code is 1 when it doesn't verify.
+
+This is how a generated changeset's intent is changed: changeset build writes it, you edit deltas/vX_Y_Z.json - a drop
+and an add made a rename, a script delta that migrates data, steps split or reordered - and verify proves the edited
+changeset still brings the baseline to the current state. Then commit it with the state changes it covers. While it
+isn't committed, changeset build won't write another, so the edits can't be overwritten.
+
+Verify proves the resulting schema, not the data: it builds into an empty scratch schema, so a rename and a drop and
+an add both verify. Whether the data survives is for you to review - for renames and NOT NULL backfills, the hints
+(skima changeset rename and backfill) generate the right deltas without hand edits.
+
+With no changeset named, the one changeset not committed yet is verified. The file is validated as apply validates
+it first. Both builds run in a scratch schema created inside a transaction that is always rolled back - nothing is
+changed and no apply lock is taken, but the database user needs the CREATE privilege on the database.
+
+Example:
+  skima changeset verify
+  skima changeset verify v1_0_4.json
+  skima changeset verify --output=json`,
+	Args: cobra.MaximumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		workdir := viper.GetString("workdir")
+		name := ""
+		if len(args) == 1 {
+			name = args[0]
+		}
+		path, err := changes.PendingChangeset(workdir, name)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ERROR:", err)
+			os.Exit(1)
+		}
+		baseline, err := changes.ResolveBaseline(workdir, baselineRef)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ERROR:", err)
+			os.Exit(1)
+		}
+		report, err := verify.File(workdir, baseline, path)
+		var invalid *changes.InvalidChangesetError
+		switch {
+		case errors.As(err, &invalid):
+			fmt.Fprintf(os.Stderr, "ERROR: %s is invalid - fix it before verifying:\n", filepath.Base(path))
+			for _, issue := range invalid.Issues {
+				fmt.Fprintln(os.Stderr, "  "+issue)
+			}
+			os.Exit(1)
+		case err != nil:
+			fmt.Fprintln(os.Stderr, "ERROR: unable to verify the changeset:", err)
+			os.Exit(1)
+		}
+		if output == "json" {
+			jsonOutput, err := json.MarshalIndent(report, "", "  ")
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Unable to marshal the verification into JSON", err)
+				os.Exit(1)
+			}
+			fmt.Println(string(jsonOutput))
+		} else {
+			from := "the last commit that changed deltas/"
+			if baseline.Ref != "" {
+				from = baseline.Ref
+			}
+			fmt.Printf("Baseline: %.7s %q (%s)\n", baseline.Commit, baseline.Subject, from)
+			fmt.Printf("Changeset: %s (%d deltas)\n", report.File, report.Deltas)
+			printVerify(report)
+		}
+		if !report.Verified {
+			os.Exit(1)
+		}
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(changesetCmd)
+	changesetCmd.AddCommand(changesetVerifyCmd)
 	changesetCmd.PersistentFlags().StringVar(&baselineRef, "baseline", "", "The git ref to compare with - by default the last commit that changed the deltas directory")
 	changesetCmd.AddCommand(changesetDiffCmd)
 	changesetDiffCmd.Flags().BoolVar(&diffVerify, "verify", false, "Prove the changeset against the database: the baseline's state with the changeset applied must equal the current state - the exit code is 1 when it doesn't")

@@ -1,10 +1,14 @@
 // Package verify proves a generated changeset against a database: building the baseline's state files and applying
 // the changeset on top must give exactly the schema a build of the current state files gives (see
-// docs/specs/state-editor-api.md). Both are shadow builds, as skima drift's - nothing is changed, no apply lock is
-// taken, and only the TEMP privilege is needed
+// docs/specs/state-editor-api.md). Both builds run in a scratch schema inside a transaction that is always rolled back -
+// nothing is changed and no apply lock is taken, but the database user needs the CREATE privilege.
+//
+// Verify proves the resulting schema, not the data: the scratch schema has no rows, so a column renamed and a column
+// dropped and added again both verify. Keeping the data is what the rename and backfill hints are for
 package verify
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -18,7 +22,9 @@ import (
 // Report is the outcome of verifying a changeset
 type Report struct {
 	Baseline changes.Baseline `json:"baseline"`
-	Deltas   int              `json:"deltas"`
+	// File is the changeset file verified, relative to the working directory - empty for a generated changeset
+	File   string `json:"file,omitempty"`
+	Deltas int    `json:"deltas"`
 	// Verified is true when the baseline with the changeset applied is exactly the current state
 	Verified bool `json:"verified"`
 	// Findings are the differences, as skima drift reports them: "expected" is the current state files, "actual" the
@@ -43,7 +49,50 @@ func Run(workdir string, baseline changes.Baseline, draft changes.Draft) (Report
 
 // Deltas verifies a changeset made of the deltas against the baseline
 func Deltas(workdir string, baseline changes.Baseline, deltas []changes.Delta) (Report, error) {
-	report := Report{Baseline: baseline, Deltas: len(deltas), Findings: []drift.Finding{}}
+	scratch, err := os.MkdirTemp("", "skima-verify-")
+	if err != nil {
+		return Report{Baseline: baseline, Deltas: len(deltas), Findings: []drift.Finding{}}, err
+	}
+	defer os.RemoveAll(scratch)
+	content, err := changes.Changeset{Description: "verify", Deltas: deltas}.Format()
+	if err != nil {
+		return Report{Baseline: baseline, Deltas: len(deltas), Findings: []drift.Finding{}}, err
+	}
+	changesetPath := filepath.Join(scratch, "verify.json")
+	if err = os.WriteFile(changesetPath, content, 0o644); err != nil {
+		return Report{Baseline: baseline, Deltas: len(deltas), Findings: []drift.Finding{}}, err
+	}
+	return changesetFile(workdir, baseline, changesetPath, len(deltas))
+}
+
+// File verifies a changeset file - typically the one changeset build wrote, edited by hand to change its intent. The
+// file is validated as apply validates it first: an *changes.InvalidChangesetError lists the problems
+func File(workdir string, baseline changes.Baseline, path string) (Report, error) {
+	rel, err := filepath.Rel(workdir, path)
+	if err != nil {
+		rel = path
+	}
+	report := Report{Baseline: baseline, File: rel, Findings: []drift.Finding{}}
+	if err = changes.ValidateChangeset(workdir, path); err != nil {
+		return report, err
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return report, err
+	}
+	var changeset changes.Changeset
+	if err = json.Unmarshal(content, &changeset); err != nil {
+		return report, err
+	}
+	report, err = changesetFile(workdir, baseline, path, len(changeset.Deltas))
+	report.File = rel
+	return report, err
+}
+
+// changesetFile verifies the changeset file against the baseline. The changeset reads its definitions and scripts
+// from the current state files and deltas/scripts, as apply's would
+func changesetFile(workdir string, baseline changes.Baseline, changesetPath string, deltas int) (Report, error) {
+	report := Report{Baseline: baseline, Deltas: deltas, Findings: []drift.Finding{}}
 	scratch, err := os.MkdirTemp("", "skima-verify-")
 	if err != nil {
 		return report, err
@@ -63,16 +112,6 @@ func Deltas(workdir string, baseline changes.Baseline, deltas []changes.Delta) (
 	})
 	if err != nil {
 		return report, fmt.Errorf("planning the baseline's state build: %w", err)
-	}
-
-	// the changeset reads its definitions from the current state files, as apply's would
-	content, err := changes.Changeset{Description: "verify", Deltas: deltas}.Format()
-	if err != nil {
-		return report, err
-	}
-	changesetPath := filepath.Join(scratch, "verify.json")
-	if err = os.WriteFile(changesetPath, content, 0o644); err != nil {
-		return report, err
 	}
 	err = plan.InWorkdir(workdir, func() error {
 		var err error

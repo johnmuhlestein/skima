@@ -42,6 +42,7 @@ func (s *Server) routes() {
 	m.HandleFunc("DELETE /api/v1/changes/hints/{id}", s.deleteHint)
 	m.HandleFunc("POST /api/v1/changes/verify", s.verifyChanges)
 	m.HandleFunc("POST /api/v1/changesets", s.buildChangeset)
+	m.HandleFunc("POST /api/v1/changesets/{name}/verify", s.verifyChangeset)
 
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "no such endpoint: "+r.Method+" "+r.URL.Path+" - see /api/v1/openapi.json", nil)
@@ -485,9 +486,7 @@ func (s *Server) getChanges(w http.ResponseWriter, r *http.Request) {
 // verifyChanges proves the generated changeset against the database - see verify.Run. It needs the database settings
 // and the CREATE privilege; a changeset that doesn't verify is still a 200, with verified false
 func (s *Server) verifyChanges(w http.ResponseWriter, r *http.Request) {
-	if viper.GetString("dbconn.connstring") == "" {
-		// checked here: connecting with no database configured exits the process
-		writeError(w, http.StatusServiceUnavailable, "verify_unavailable", "no database is configured to verify against - set dbconn in the config file or SKM_DBCONN_* and restart skima serve", nil)
+	if !verifyAvailable(w) {
 		return
 	}
 	baseline, ok := s.resolveBaseline(w, r)
@@ -505,6 +504,60 @@ func (s *Server) verifyChanges(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, report)
+}
+
+// verifyAvailable checks a database is configured - connecting with none configured exits the process
+func verifyAvailable(w http.ResponseWriter) bool {
+	if viper.GetString("dbconn.connstring") == "" {
+		writeError(w, http.StatusServiceUnavailable, "verify_unavailable", "no database is configured to verify against - set dbconn in the config file or SKM_DBCONN_* and restart skima serve", nil)
+		return false
+	}
+	return true
+}
+
+// verifyChangeset proves a changeset file not committed yet against the database - typically the one changeset build
+// wrote, edited by hand to change its intent. See verify.File
+func (s *Server) verifyChangeset(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	path, err := changes.PendingChangeset(s.workdir, name)
+	var committed *changes.CommittedChangesetError
+	switch {
+	case strings.ContainsAny(name, `/\`) || errors.Is(err, changes.ErrChangesetNotFound):
+		writeError(w, http.StatusNotFound, "not_found", "no such changeset: deltas/"+name, nil)
+		return
+	case errors.As(err, &committed):
+		writeError(w, http.StatusConflict, "committed_changeset", err.Error(), nil)
+		return
+	case err != nil:
+		writeFailure(w, err)
+		return
+	}
+	// validated before the database is needed, so an invalid edit is reported without one
+	err = changes.ValidateChangeset(s.workdir, path)
+	var invalid *changes.InvalidChangesetError
+	if errors.As(err, &invalid) {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_changeset", name+" is invalid - fix it before verifying", func(e *apiError) { e.Issues = invalid.Issues })
+		return
+	} else if err != nil {
+		writeFailure(w, err)
+		return
+	}
+	if !verifyAvailable(w) {
+		return
+	}
+	baseline, ok := s.resolveBaseline(w, r)
+	if !ok {
+		return
+	}
+	report, err := verify.File(s.workdir, baseline, path)
+	switch {
+	case errors.As(err, &invalid):
+		writeError(w, http.StatusUnprocessableEntity, "invalid_changeset", name+" is invalid - fix it before verifying", func(e *apiError) { e.Issues = invalid.Issues })
+	case err != nil:
+		writeError(w, http.StatusServiceUnavailable, "verify_unavailable", "unable to verify against the database: "+err.Error(), nil)
+	default:
+		writeJSON(w, http.StatusOK, report)
+	}
 }
 
 type hint struct {
