@@ -471,3 +471,23 @@ func TestListFiles(t *testing.T) {
 		t.Error("reading a file as a directory - EXPECTED an error  ACTUAL: nil")
 	}
 }
+
+// a malformed delta is an error, not a panic - validation that would catch it can be skipped
+func TestParseChangeSet_MalformedDelta(t *testing.T) {
+	reader = osReadWrapper{}
+	for name, changeset := range map[string]string{
+		"no object":         `{"description":"bad","deltas":[{"action":"add","name":"x"}]}`,
+		"object not a text": `{"description":"bad","deltas":[{"object":7,"action":"add","name":"x"}]}`,
+		"not an object":     `{"description":"bad","deltas":["drop table x"]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "v1_0_1.json")
+			if err := os.WriteFile(path, []byte(changeset), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ParseChangeSet(path); err == nil || !strings.Contains(err.Error(), "delta 1 of v1_0_1.json") {
+				t.Errorf("EXPECTED an error naming the delta  ACTUAL: %v", err)
+			}
+		})
+	}
+}

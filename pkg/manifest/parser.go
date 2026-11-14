@@ -259,10 +259,18 @@ func ParseChangeSet(path string) (ChangeSet, error) {
 		activeChangeSet.ParsedDeltas = make([]Delta, len(activeChangeSet.Deltas))
 		activeChangeSet.Filename = filepath.Base(path)
 		for idx, delta := range activeChangeSet.Deltas {
-			objType := delta.(map[string]interface{})["object"].(string)
+			// validation normally catches these, but it can be skipped (--skip-validation)
+			fields, ok := delta.(map[string]interface{})
+			if !ok {
+				return activeChangeSet, fmt.Errorf("delta %d of %s is not a JSON object", idx+1, namePart)
+			}
+			objType, ok := fields["object"].(string)
+			if !ok {
+				return activeChangeSet, fmt.Errorf("delta %d of %s has no \"object\" - it must be a string such as table, column or script", idx+1, namePart)
+			}
 			var simple bool
 			// script deltas are always SqlDeltas - one that points at a script file has none of the other markers
-			if objType != "script" && delta.(map[string]interface{})["def"] == nil && delta.(map[string]interface{})["mods"] == nil && delta.(map[string]interface{})["sql"] == nil {
+			if objType != "script" && fields["def"] == nil && fields["mods"] == nil && fields["sql"] == nil {
 				simple = true
 			}
 			if simple {

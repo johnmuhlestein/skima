@@ -50,6 +50,9 @@ func call(t *testing.T, s *Server, method string, path string, body string, head
 		reader = strings.NewReader(body)
 	}
 	req := httptest.NewRequest(method, "http://127.0.0.1:7012"+path, reader)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	for i := 0; i+1 < len(headers); i += 2 {
 		req.Header.Set(headers[i], headers[i+1])
 	}
@@ -353,5 +356,46 @@ func TestVerifyChangesetFile(t *testing.T) {
 	expect(t, res, 422, "invalid_changeset")
 	if !strings.Contains(res.raw, "no_such_table") {
 		t.Errorf("EXPECTED the issue named  ACTUAL: %s", res.raw)
+	}
+}
+
+// a page on another site must not be able to change the state files through the user's browser
+func TestCrossOriginWritesRejected(t *testing.T) {
+	s, workdir := fixture(t, Options{CorsOrigin: "http://localhost:5173"})
+	table := `{"name":"csrf","columns":[{"name":"id","datatype":"uuid","nullable":false}]}`
+	created := func() bool {
+		_, err := os.Stat(filepath.Join(workdir, "state", "csrf-table.json"))
+		return err == nil
+	}
+
+	res := call(t, s, "POST", "/api/v1/state/tables", table, "Origin", "http://evil.example")
+	if res.status != http.StatusForbidden || created() {
+		t.Errorf("another origin - EXPECTED 403 and no file  ACTUAL: %d %s, created %v", res.status, res.raw, created())
+	}
+	res = call(t, s, "POST", "/api/v1/changes/verify", "", "Origin", "http://evil.example")
+	if res.status != http.StatusForbidden {
+		t.Errorf("another origin, no body - EXPECTED 403  ACTUAL: %d %s", res.status, res.raw)
+	}
+	res = call(t, s, "POST", "/api/v1/state/tables", table, "Sec-Fetch-Site", "cross-site")
+	if res.status != http.StatusForbidden || created() {
+		t.Errorf("cross-site fetch - EXPECTED 403 and no file  ACTUAL: %d %s", res.status, res.raw)
+	}
+	// the body a page can send without a preflight
+	res = call(t, s, "POST", "/api/v1/state/tables", table, "Content-Type", "text/plain")
+	if res.status != http.StatusUnsupportedMediaType || created() {
+		t.Errorf("text/plain body - EXPECTED 415 and no file  ACTUAL: %d %s", res.status, res.raw)
+	}
+	// reading is not blocked - the browser keeps the response from the page without a CORS header
+	if res = call(t, s, "GET", "/api/v1/state/tables", "", "Origin", "http://evil.example"); res.status != http.StatusOK {
+		t.Errorf("cross-origin read - EXPECTED 200  ACTUAL: %d", res.status)
+	}
+	// the API's own origin and the allowed one can write
+	res = call(t, s, "POST", "/api/v1/state/tables", table, "Origin", "http://127.0.0.1:7012")
+	if res.status != http.StatusCreated || !created() {
+		t.Errorf("same origin - EXPECTED 201  ACTUAL: %d %s", res.status, res.raw)
+	}
+	res = call(t, s, "POST", "/api/v1/state/tables", strings.Replace(table, "csrf", "allowed", 1), "Origin", "http://localhost:5173", "Content-Type", "application/json; charset=utf-8")
+	if res.status != http.StatusCreated {
+		t.Errorf("allowed origin - EXPECTED 201  ACTUAL: %d %s", res.status, res.raw)
 	}
 }
