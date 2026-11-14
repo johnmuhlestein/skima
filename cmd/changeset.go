@@ -4,9 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"skima/pkg/changes"
-	"skima/pkg/plan"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -68,7 +66,7 @@ Example:
 			fmt.Fprintln(os.Stderr, "ERROR:", err)
 			os.Exit(1)
 		}
-		statements, planErr := previewSql(result.Deltas)
+		statements, planErr := changes.PreviewSql(result.Deltas)
 		if output == "json" {
 			report := struct {
 				changes.Result
@@ -94,38 +92,6 @@ func init() {
 	changesetCmd.PersistentFlags().StringVar(&baselineRef, "baseline", "", "The git ref to compare with - by default the last commit that changed the deltas directory")
 	changesetCmd.AddCommand(changesetDiffCmd)
 	changesetDiffCmd.Flags().BoolVar(&diffCheck, "check", false, "Show nothing unless the state changed since the baseline - the exit code is 1 when it did")
-}
-
-// previewSql plans the generated deltas as a changeset, returning the statements apply would run
-func previewSql(deltas []changes.Delta) ([]string, error) {
-	statements := []string{}
-	if len(deltas) == 0 {
-		return statements, nil
-	}
-	content, err := changes.Changeset{Deltas: deltas}.Format()
-	if err != nil {
-		return statements, err
-	}
-	dir, err := os.MkdirTemp("", "skima-diff-")
-	if err != nil {
-		return statements, err
-	}
-	defer os.RemoveAll(dir)
-	path := filepath.Join(dir, "next.json")
-	if err = os.WriteFile(path, content, 0o644); err != nil {
-		return statements, err
-	}
-	unit, _, err := plan.ForChangesetFile(path)
-	if err != nil {
-		return statements, err
-	}
-	for _, step := range unit.Steps {
-		if step.Script != "" {
-			statements = append(statements, "-- runs "+step.Script)
-		}
-		statements = append(statements, step.Sql...)
-	}
-	return statements, nil
 }
 
 func printDiff(result changes.Result, statements []string, planErr error) {
