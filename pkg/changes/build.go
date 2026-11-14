@@ -60,13 +60,13 @@ func (e *UnsupportedChangesError) Error() string {
 	return fmt.Sprintf("%d changes generate no deltas and need them written by hand - acknowledge them to build the rest", len(e.Changes))
 }
 
-// InvalidChangesetError is returned when the written changeset doesn't validate - it is removed again
+// InvalidChangesetError is returned when a changeset doesn't validate - Build removes the one it wrote again
 type InvalidChangesetError struct {
 	Issues []string
 }
 
 func (e *InvalidChangesetError) Error() string {
-	return "the generated changeset is invalid: " + strings.Join(e.Issues, "; ")
+	return "the changeset is invalid: " + strings.Join(e.Issues, "; ")
 }
 
 // LatestVersion returns the highest changeset version in the working directory - 1.0.0 when there are none, as
@@ -155,11 +155,22 @@ func Build(workdir string, baseline Baseline, opts BuildOptions) (BuildResult, e
 	if err = util.WriteFileAtomic(path, content, 0o644); err != nil {
 		return BuildResult{}, err
 	}
-	// validated as apply validates a pending changeset: schema, file name and references, all as errors
-	results, err := manifest.ValidateForApply(workdir, []string{path})
-	if err != nil {
+	if err = ValidateChangeset(workdir, path); err != nil {
 		os.Remove(path)
 		return BuildResult{}, err
+	}
+	if err = ClearDraft(workdir); err != nil {
+		return BuildResult{}, err
+	}
+	return BuildResult{File: filepath.Join("deltas", version.FileName()), Version: version.String(), Content: content, Diff: diff}, nil
+}
+
+// ValidateChangeset validates a changeset file as apply validates a pending changeset: schema, file name and
+// references, all as errors - an *InvalidChangesetError lists them
+func ValidateChangeset(workdir, path string) error {
+	results, err := manifest.ValidateForApply(workdir, []string{path})
+	if err != nil {
+		return err
 	}
 	var issues []string
 	for _, r := range results {
@@ -171,11 +182,7 @@ func Build(workdir string, baseline Baseline, opts BuildOptions) (BuildResult, e
 		}
 	}
 	if len(issues) > 0 {
-		os.Remove(path)
-		return BuildResult{}, &InvalidChangesetError{Issues: issues}
+		return &InvalidChangesetError{Issues: issues}
 	}
-	if err = ClearDraft(workdir); err != nil {
-		return BuildResult{}, err
-	}
-	return BuildResult{File: filepath.Join("deltas", version.FileName()), Version: version.String(), Content: content, Diff: diff}, nil
+	return nil
 }

@@ -144,6 +144,7 @@ Every write takes `If-Match` with the table's ETag and returns the updated table
 | `DELETE /changes/hints/{id}` | Discard a hint (e.g. treat a rename as drop + add after all) |
 | `POST /changes/verify` | [Verify](#verify-needs-a-database) the generated changeset against a database |
 | `POST /changesets` | Build: write the changeset file (see [Building](#building-the-changeset)) |
+| `POST /changesets/{name}/verify` | [Verify](#verify-needs-a-database) a changeset file not committed yet - e.g. the built one, [edited by hand](#changing-a-generated-changesets-intent) |
 
 ### Errors
 
@@ -270,6 +271,13 @@ state directly, and compares the two schemas. Any difference means the generator
 changeset) is wrong; a changeset that fails to apply to the baseline is reported with the failing statement. It
 changes nothing and takes no apply lock.
 
+`POST /changesets/{name}/verify` (and `skima changeset verify [file]`) verifies a changeset file not committed yet the
+same way - the one `build` wrote, edited by hand. The file is validated first (`422` with the issues); `404` for no
+such file, `409` for a committed one (it is part of the baseline, so there's nothing to verify it against).
+
+Verify proves the resulting **schema**, not the data: the scratch schema has no rows, so a rename and a drop + add both
+verify. Whether data survives is for the author to review - which is why renames and backfills are hints.
+
 *Resolved - privileges:* both builds run in a scratch schema created inside a transaction that is always rolled back, so
 the database user needs the CREATE privilege on the database. `drift`'s temporary-table build (TEMP privilege only)
 doesn't work here: it depends on the deployed schema - functions created in `pg_temp` are never found by unqualified
@@ -281,7 +289,8 @@ scratch schema on the search path, verify builds exactly as apply does, and work
 The change detection and build engine is a package the server and the CLI share:
 
 ```
-skima changeset diff     [--baseline <ref>] [--output json] [--check]
+skima changeset diff     [--baseline <ref>] [--output json] [--check] [--verify]
+skima changeset verify   [file] [--baseline <ref>] [--output json]
 skima changeset build    --description "..." [--bump patch|minor|major | --version X.Y.Z] [--acknowledge-unsupported] [--no-transaction]
 skima changeset rename   <table> <from> <to>
 skima changeset backfill <table> <column> (--expression <sql> | --script <file>)
@@ -310,6 +319,7 @@ Milestones, each a PR:
 2. **Change detection and build** — `pkg/changes`, `skima changeset diff|build`
 3. **Server** — `pkg/server`, `skima serve`, OpenAPI
 4. **Verify** — `POST /changes/verify` and `skima changeset diff --verify`
+5. **Hand-edited changesets** — `POST /changesets/{name}/verify` and `skima changeset verify`
 
 ## Testing
 
@@ -328,12 +338,22 @@ Milestones, each a PR:
    (see [Verify](#verify-needs-a-database)).
 3. **Port** — `7012` by default (registered only to an obscure service, "Talon Engine").
 4. **Backfill** — a SQL expression or a script file in `deltas/scripts`.
+5. **Changing a generated delta's intent** — see [below](#changing-a-generated-changesets-intent).
 
-## Open questions
+## Changing a generated changeset's intent
 
-1. **Changing a generated delta's intent** (e.g. drop + add instead of rename) — beyond discarding hints, should the
-   draft allow overriding how a change becomes deltas? Revisit after milestone 2, once `skima changeset diff` shows
-   generated changesets on real changes.
+The generated changeset is a starting point to review, not a final answer. When its deltas are not the intent - a drop +
+add that should be a rename, a data migration between steps, steps split or reordered - edit the built file:
+
+1. Make the changes (API or by hand) and `build`: `deltas/vX_Y_Z.json` is written, not committed.
+2. Review it; edit it by hand if the intent is wrong.
+3. `skima changeset verify` (or `POST /changesets/{name}/verify`): the edited changeset must still bring the baseline to
+   the current state.
+4. Commit it with the state changes it covers.
+
+The draft is not extended with overrides: hints cover the intents a diff can't infer and survive regenerating, and
+anything else is clearer as the changeset itself. While the changeset is not committed, `build` refuses to write
+another, so hand edits can't be overwritten. Verify proves the schema, not the data, so step 2 stays the author's.
 
 ## Iteration 2 preview
 

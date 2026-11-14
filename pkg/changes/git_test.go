@@ -95,3 +95,44 @@ func TestBaselineOutsideGit(t *testing.T) {
 		t.Error("EXPECTED an error outside a git repository")
 	}
 }
+
+func TestPendingChangeset(t *testing.T) {
+	workdir, run := repo(t)
+	write(t, filepath.Join(workdir, "deltas", "v1_0_1.json"), `{"deltas":[]}`)
+	run("add", ".")
+	run("commit", "-q", "-m", "changeset 1.0.1")
+	if _, err := PendingChangeset(workdir, ""); !errors.Is(err, ErrNoPendingChangeset) {
+		t.Errorf("nothing pending - EXPECTED ErrNoPendingChangeset  ACTUAL: %v", err)
+	}
+	var committed *CommittedChangesetError
+	if _, err := PendingChangeset(workdir, "v1_0_1.json"); !errors.As(err, &committed) {
+		t.Errorf("a committed changeset - EXPECTED a CommittedChangesetError  ACTUAL: %v", err)
+	}
+	if _, err := PendingChangeset(workdir, "v9_9_9.json"); !errors.Is(err, ErrChangesetNotFound) {
+		t.Errorf("EXPECTED ErrChangesetNotFound  ACTUAL: %v", err)
+	}
+
+	write(t, filepath.Join(workdir, "deltas", "v1_0_2.json"), `{"deltas":[]}`)
+	want := filepath.Join(workdir, "deltas", "v1_0_2.json")
+	for _, name := range []string{"", "v1_0_2.json", filepath.Join("deltas", "v1_0_2.json")} {
+		if path, err := PendingChangeset(workdir, name); err != nil || path != want {
+			t.Errorf("%q - EXPECTED %s  ACTUAL: %s %v", name, want, path, err)
+		}
+	}
+
+	write(t, filepath.Join(workdir, "deltas", "v1_0_3.json"), `{"deltas":[]}`)
+	var ambiguous *AmbiguousPendingError
+	if _, err := PendingChangeset(workdir, ""); !errors.As(err, &ambiguous) || !slices.Equal(ambiguous.Files, []string{"v1_0_2.json", "v1_0_3.json"}) {
+		t.Errorf("two pending - EXPECTED an AmbiguousPendingError  ACTUAL: %v", err)
+	}
+	if path, err := PendingChangeset(workdir, "v1_0_3.json"); err != nil || filepath.Base(path) != "v1_0_3.json" {
+		t.Errorf("two pending, one named - EXPECTED v1_0_3.json  ACTUAL: %s %v", path, err)
+	}
+
+	// a committed changeset deleted from the working tree is pending, but there's nothing to verify
+	os.Remove(filepath.Join(workdir, "deltas", "v1_0_1.json"))
+	os.Remove(filepath.Join(workdir, "deltas", "v1_0_3.json"))
+	if path, err := PendingChangeset(workdir, ""); err != nil || path != want {
+		t.Errorf("a deleted changeset pending too - EXPECTED %s  ACTUAL: %s %v", want, path, err)
+	}
+}

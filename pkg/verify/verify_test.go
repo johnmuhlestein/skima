@@ -1,6 +1,8 @@
 package verify
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,7 +16,7 @@ import (
 )
 
 // database skips the test unless a postgres is configured: SKIMA_VERIFY_DATABASE=1 and the usual SKM_DBCONN_* settings
-// (connstring, port, database, schema, username, password). Verify only needs the TEMP privilege
+// (connstring, port, database, schema, username, password). Verify needs the CREATE privilege
 func database(t *testing.T) {
 	t.Helper()
 	if os.Getenv("SKIMA_VERIFY_DATABASE") != "1" {
@@ -165,5 +167,120 @@ func TestVerifyCatchesWrongChangesets(t *testing.T) {
 	}
 	if report.Verified || !strings.Contains(report.ApplyError, "no_such_table") {
 		t.Errorf("EXPECTED the failing statement reported  ACTUAL: %+v", report)
+	}
+}
+
+// build writes the changeset for the edits as changeset build would, returning its path
+func build(t *testing.T, workdir string, baseline changes.Baseline) (string, changes.Changeset) {
+	t.Helper()
+	result, err := changes.Build(workdir, baseline, changes.BuildOptions{Description: "hand edited"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(workdir, result.File)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var changeset changes.Changeset
+	if err = json.Unmarshal(content, &changeset); err != nil {
+		t.Fatal(err)
+	}
+	return path, changeset
+}
+
+func rewrite(t *testing.T, path string, changeset changes.Changeset) {
+	t.Helper()
+	content, err := changeset.Format()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fileLocationDeltas reports whether a delta is part of the generated drop and add of documents.file_location
+func fileLocationDelta(d changes.Delta) bool {
+	return d.Reference == "documents" && (d.Name == "file_location" || d.Name == "storage_path" || d.Name == "documents_file_location_unq")
+}
+
+func expectFileVerified(t *testing.T, workdir string, baseline changes.Baseline, path string) Report {
+	t.Helper()
+	report, err := File(workdir, baseline, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Verified || report.File != filepath.Join("deltas", filepath.Base(path)) {
+		t.Errorf("EXPECTED %s to verify\n  apply error: %s\n  findings: %+v", report.File, report.ApplyError, report.Findings)
+	}
+	return report
+}
+
+// the intent of a generated changeset is changed by editing it: a column renamed by hand in the state file, with no
+// hint, generates a drop and an add - edited into a rename, and then into an add, a data migration and a drop
+func TestVerifyHandEditedChangeset(t *testing.T) {
+	database(t)
+	workdir, baseline := fixture(t)
+	documents := filepath.Join(workdir, "state", "documents-table.json")
+	content, err := os.ReadFile(documents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(documents, []byte(strings.ReplaceAll(string(content), `"file_location"`, `"storage_path"`)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := &edits{t: t, ed: editor.New(workdir)}
+	e.must(e.ed.AddColumn("tags", e.etag("tags"), manifest.Column{Name: "notes", Datatype: "text", Nullable: true}))
+	path, generated := build(t, workdir, baseline)
+	t.Logf("generated: %+v", generated.Deltas)
+	// the generated drop and add verifies too - verify proves the schema, not the data
+	expectFileVerified(t, workdir, baseline, path)
+
+	var others []changes.Delta
+	for _, d := range generated.Deltas {
+		if !fileLocationDelta(d) {
+			others = append(others, d)
+		}
+	}
+	if len(others) == len(generated.Deltas) {
+		t.Fatalf("EXPECTED a generated drop and add of file_location  ACTUAL: %+v", generated.Deltas)
+	}
+
+	// edited into a rename
+	renamed := generated
+	renamed.Deltas = append([]changes.Delta{{Object: "column", Action: "rename", Name: "file_location", NewName: "storage_path", Reference: "documents"}}, others...)
+	rewrite(t, path, renamed)
+	if report := expectFileVerified(t, workdir, baseline, path); report.Deltas != len(renamed.Deltas) {
+		t.Errorf("EXPECTED %d deltas  ACTUAL: %d", len(renamed.Deltas), report.Deltas)
+	}
+
+	// edited into an add, a data migration and a drop - the unique constraint follows the column by name
+	migrated := generated
+	migrated.Deltas = append([]changes.Delta{
+		{Object: "column", Action: "add", Name: "storage_path", Reference: "documents"},
+		{Object: "script", Description: "copy the locations", Sql: []string{"update documents set storage_path = file_location"}},
+		{Object: "constraint", Action: "drop", Name: "documents_file_location_unq", Reference: "documents"},
+		{Object: "column", Action: "drop", Name: "file_location", Reference: "documents"},
+		{Object: "constraint", Action: "add", Name: "documents_file_location_unq", Reference: "documents"},
+	}, others...)
+	rewrite(t, path, migrated)
+	expectFileVerified(t, workdir, baseline, path)
+
+	// a wrong edit: the rename left out, so the column isn't there
+	rewrite(t, path, changes.Changeset{Description: "wrong", Deltas: others})
+	report, err := File(workdir, baseline, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Verified || len(report.Findings) == 0 {
+		t.Errorf("EXPECTED the missing rename found  ACTUAL: %+v", report)
+	}
+
+	// an edit that breaks the file is reported before anything runs
+	rewrite(t, path, changes.Changeset{Description: "invalid", Deltas: append([]changes.Delta{{Object: "column", Action: "add", Name: "nope", Reference: "documents"}}, others...)})
+	var invalid *changes.InvalidChangesetError
+	if _, err = File(workdir, baseline, path); !errors.As(err, &invalid) {
+		t.Errorf("EXPECTED an InvalidChangesetError  ACTUAL: %v", err)
 	}
 }

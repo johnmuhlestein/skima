@@ -1236,11 +1236,85 @@
           }
         }
       }
+    },
+    "/api/v1/changesets/{name}/verify": {
+      "post": {
+        "summary": "Prove a changeset not committed yet against the database",
+        "description": "Verifies a changeset file in deltas/ that is not committed yet - typically the one POST /api/v1/changesets wrote, edited by hand to change its intent (a drop and an add made a rename, a script delta that migrates data). The file is validated as apply validates it, then verified as POST /api/v1/changes/verify verifies the generated changeset: the baseline's state files built with the changeset applied on top must be exactly what the current state files build. Verify proves the resulting schema, not the data - the scratch schema has no rows. A changeset that doesn't verify is still a 200, with verified false.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The changeset's file name, e.g. v1_0_4.json",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "baseline",
+            "in": "query",
+            "required": false,
+            "description": "A git ref to compare with, instead of the server's default baseline",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The verification",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Verify"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "404": {
+            "$ref": "#/components/responses/E404"
+          },
+          "409": {
+            "description": "The changeset is committed - part of the baseline - or there is no baseline",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The changeset is invalid - issues lists the problems",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The database can't be used to verify",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
     "responses": {
-      "400": {
+      "E400": {
         "description": "Bad request",
         "content": {
           "application/json": {
@@ -1250,7 +1324,7 @@
           }
         }
       },
-      "404": {
+      "E404": {
         "description": "Not found",
         "content": {
           "application/json": {
@@ -1260,7 +1334,7 @@
           }
         }
       },
-      "409": {
+      "E409": {
         "description": "Conflict - see error.code",
         "content": {
           "application/json": {
@@ -1270,7 +1344,7 @@
           }
         }
       },
-      "412": {
+      "E412": {
         "description": "The file changed since it was read (stale ETag) - read it again",
         "content": {
           "application/json": {
@@ -1280,7 +1354,7 @@
           }
         }
       },
-      "422": {
+      "E422": {
         "description": "Invalid - see error.issues",
         "content": {
           "application/json": {
@@ -1290,7 +1364,7 @@
           }
         }
       },
-      "428": {
+      "E428": {
         "description": "If-Match is required on edits",
         "content": {
           "application/json": {
@@ -1585,6 +1659,10 @@
         "properties": {
           "baseline": {
             "type": "object"
+          },
+          "file": {
+            "type": "string",
+            "description": "The changeset file verified, relative to the working directory - absent for the generated changeset"
           },
           "deltas": {
             "type": "integer"

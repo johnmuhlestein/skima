@@ -148,6 +148,38 @@ func TestOpenAPIDescribesEveryRoute(t *testing.T) {
 	}
 }
 
+// every $ref in the OpenAPI document resolves to a definition in it
+func TestOpenAPIReferencesResolve(t *testing.T) {
+	var doc any
+	if err := json.Unmarshal(openAPI, &doc); err != nil {
+		t.Fatal(err)
+	}
+	var walk func(v any)
+	walk = func(v any) {
+		switch v := v.(type) {
+		case map[string]any:
+			if ref, ok := v["$ref"].(string); ok && strings.HasPrefix(ref, "#/") { // the state file schemas are external
+				target := doc
+				for _, part := range strings.Split(strings.TrimPrefix(ref, "#/"), "/") {
+					m, _ := target.(map[string]any)
+					target = m[part]
+				}
+				if target == nil {
+					t.Errorf("$ref %s doesn't resolve", ref)
+				}
+			}
+			for _, child := range v {
+				walk(child)
+			}
+		case []any:
+			for _, child := range v {
+				walk(child)
+			}
+		}
+	}
+	walk(doc)
+}
+
 func TestEditPreconditions(t *testing.T) {
 	s, _ := fixture(t, Options{})
 	column := `{"name":"archived","datatype":"boolean","nullable":false,"default":"false"}`
@@ -293,4 +325,33 @@ func TestVerifyNeedsADatabase(t *testing.T) {
 	s, _ := fixture(t, Options{})
 	viper.Set("dbconn.connstring", "")
 	expect(t, call(t, s, "POST", "/api/v1/changes/verify", ""), 503, "verify_unavailable")
+}
+
+func TestVerifyChangesetFile(t *testing.T) {
+	s, workdir := fixture(t, Options{})
+	viper.Set("dbconn.connstring", "")
+	expect(t, call(t, s, "POST", "/api/v1/changesets/v9_9_9.json/verify", ""), 404, "not_found")
+	expect(t, call(t, s, "POST", "/api/v1/changesets/v1_0_3.json/verify", ""), 409, "committed_changeset")
+
+	call(t, s, "POST", "/api/v1/state/tables/projects/columns", `{"name":"archived","datatype":"boolean","nullable":true}`, "If-Match", etag(t, s, "projects"))
+	if res := call(t, s, "POST", "/api/v1/changesets", `{"description":"archived projects"}`); res.status != 201 {
+		t.Fatalf("build: %d %s", res.status, res.raw)
+	}
+	// valid, but there's no database to verify against
+	expect(t, call(t, s, "POST", "/api/v1/changesets/v1_0_4.json/verify", ""), 503, "verify_unavailable")
+
+	// a hand edit that breaks the file is reported without a database
+	path := filepath.Join(workdir, "deltas", "v1_0_4.json")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(path, bytes.Replace(content, []byte(`"reference": "projects"`), []byte(`"reference": "no_such_table"`), 1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := call(t, s, "POST", "/api/v1/changesets/v1_0_4.json/verify", "")
+	expect(t, res, 422, "invalid_changeset")
+	if !strings.Contains(res.raw, "no_such_table") {
+		t.Errorf("EXPECTED the issue named  ACTUAL: %s", res.raw)
+	}
 }

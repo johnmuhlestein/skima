@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"skima/pkg/manifest"
+	"slices"
 	"strings"
 )
 
@@ -225,6 +226,65 @@ func PendingChangesets(workdir string) ([]string, error) {
 		}
 	}
 	return pending, nil
+}
+
+// ErrNoPendingChangeset is returned when there is no uncommitted changeset to verify
+var ErrNoPendingChangeset = errors.New("no changeset is waiting to be committed - build one with skima changeset build, or verify the generated changeset with skima changeset diff --verify")
+
+// ErrChangesetNotFound is returned when a named changeset doesn't exist in deltas/
+var ErrChangesetNotFound = errors.New("no such changeset")
+
+// AmbiguousPendingError is returned when more than one changeset is waiting to be committed and none was named
+type AmbiguousPendingError struct {
+	Files []string
+}
+
+func (e *AmbiguousPendingError) Error() string {
+	return strings.Join(e.Files, ", ") + " are all waiting to be committed - name the changeset to verify"
+}
+
+// CommittedChangesetError is returned for a changeset that is already committed: it is part of the baseline, so there
+// is nothing to verify it against
+type CommittedChangesetError struct {
+	File string
+}
+
+func (e *CommittedChangesetError) Error() string {
+	return e.File + " is committed - it is part of the baseline, so only a changeset not committed yet can be verified"
+}
+
+// PendingChangeset finds the uncommitted changeset in deltas/ to verify: the named one (a file name, or a path to it)
+// or, with no name, the only one. It returns the changeset's path
+func PendingChangeset(workdir, name string) (string, error) {
+	pending, err := PendingChangesets(workdir)
+	if err != nil {
+		return "", err
+	}
+	var existing []string
+	for _, file := range pending {
+		if _, err := os.Stat(filepath.Join(workdir, "deltas", file)); err == nil {
+			existing = append(existing, file) // a deleted changeset is pending too, but there's nothing to verify
+		}
+	}
+	if name == "" {
+		switch len(existing) {
+		case 0:
+			return "", ErrNoPendingChangeset
+		case 1:
+			return filepath.Join(workdir, "deltas", existing[0]), nil
+		default:
+			return "", &AmbiguousPendingError{Files: existing}
+		}
+	}
+	file := filepath.Base(name)
+	path := filepath.Join(workdir, "deltas", file)
+	if info, err := os.Stat(path); err != nil || info.IsDir() || filepath.Ext(file) != ".json" {
+		return "", fmt.Errorf("%w: deltas/%s", ErrChangesetNotFound, file)
+	}
+	if !slices.Contains(existing, file) {
+		return "", &CommittedChangesetError{File: file}
+	}
+	return path, nil
 }
 
 func short(commit string) string {

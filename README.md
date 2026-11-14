@@ -401,6 +401,27 @@ A diff can't infer some intent, so skima keeps it as hints in `.skima/draft.json
 
 `skima changeset hints` lists the recorded hints, and `--clear` removes them.
 
+#### Changing a generated changeset
+The generated changeset is a starting point to review before committing. When its deltas aren't what you meant - a
+dropped and added column that should be a rename, data to migrate between two steps, steps to split or reorder - edit
+the built file, then prove the edit with `skima changeset verify`:
+
+```
+skima changeset build --description "storage path"   # writes deltas/v1_0_4.json
+$EDITOR deltas/v1_0_4.json                            # e.g. make the drop and add a rename
+skima changeset verify                                # the changeset not committed yet, or name it: verify v1_0_4.json
+git add . && git commit -m "storage path"
+```
+
+`skima changeset verify` validates the file as apply would, then proves it against the database as `skima changeset
+diff --verify` proves the generated changeset: the baseline with the changeset applied must be exactly the current
+state. Only a changeset not committed yet can be verified - a committed one is part of the baseline. While it isn't
+committed, `skima changeset build` won't write another, so your edits can't be overwritten.
+
+Verify proves the resulting schema, not your data: it builds into an empty scratch schema, so a rename and a drop and
+an add both verify. Reviewing that data survives is up to you - for renames and `NOT NULL` backfills, the hints above
+generate the right deltas without hand edits.
+
 ### The state editor API
 `skima serve` starts a local HTTP API for the working directory's state files, for tools and (later) a UI: read every
 state object, edit tables, see the pending changes, and build the changeset - the same engine as `skima changeset`.
@@ -419,6 +440,7 @@ skima serve --port 8080 --baseline origin/main
 | `GET /api/v1/changes`, `GET`/`DELETE /api/v1/changes/hints[/{id}]` | The changes since the baseline with their deltas and SQL; the recorded hints |
 | `POST /api/v1/changes/verify` | Prove the generated changeset against the database, as `skima changeset diff --verify` does |
 | `POST /api/v1/changesets` | Write the next changeset (`{"description": ...}`) |
+| `POST /api/v1/changesets/{name}/verify` | Prove a changeset not committed yet - e.g. edited by hand - as `skima changeset verify` does |
 | `GET /api/v1/manifest`, `GET /api/v1/validation` | A summary of the manifest; validation results |
 
 The full description is at `/api/v1/openapi.json`. Request and response bodies use the state file format.
