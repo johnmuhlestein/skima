@@ -379,7 +379,7 @@ func (e Enum) GenerateDdl() string {
 	for i, value := range e.Values {
 		values[i] = QuoteLiteral(value)
 	}
-	return fmt.Sprintf("create type %s as enum (%s)", e.Name, strings.Join(values, ", "))
+	return fmt.Sprintf("create type %s as enum (%s)", QuoteIdent(e.Name), strings.Join(values, ", "))
 }
 
 // AddValueDdl adds the value to the type in the position the enum gives it - after the value before it, or before the
@@ -389,7 +389,7 @@ func (e Enum) AddValueDdl(value string) (string, bool) {
 	if position < 0 {
 		return "", false
 	}
-	ddl := fmt.Sprintf("alter type %s add value if not exists %s", e.Name, QuoteLiteral(value))
+	ddl := fmt.Sprintf("alter type %s add value if not exists %s", QuoteIdent(e.Name), QuoteLiteral(value))
 	switch {
 	case position > 0:
 		ddl += " after " + QuoteLiteral(e.Values[position-1])
@@ -418,7 +418,7 @@ func ParseSequenceByPath(path string) (Sequence, error) {
 // exists (OwnedByDdl)
 func (s Sequence) GenerateDdl() string {
 	var bld strings.Builder
-	fmt.Fprintf(&bld, "create sequence %s", s.Name)
+	fmt.Fprintf(&bld, "create sequence %s", QuoteIdent(s.Name))
 	if s.Datatype != "" {
 		fmt.Fprintf(&bld, " as %s", s.Datatype)
 	}
@@ -438,7 +438,7 @@ func (s Sequence) GenerateDdl() string {
 
 // OwnedByDdl makes the sequence's ownedby column its owner
 func (s Sequence) OwnedByDdl() string {
-	return fmt.Sprintf("alter sequence %s owned by %s", s.Name, s.Ownedby)
+	return fmt.Sprintf("alter sequence %s owned by %s", QuoteIdent(s.Name), quoteQualified(s.Ownedby))
 }
 
 // AlterDdl brings every setting and the owner of an existing sequence in line with the definition - a setting that is
@@ -449,7 +449,7 @@ func (s Sequence) AlterDdl() string {
 	if datatype == "" {
 		datatype = "bigint"
 	}
-	fmt.Fprintf(&bld, "alter sequence %s as %s", s.Name, datatype)
+	fmt.Fprintf(&bld, "alter sequence %s as %s", QuoteIdent(s.Name), datatype)
 	orDefault := func(value *int64, fallback int64) int64 {
 		if value != nil {
 			return *value
@@ -474,7 +474,7 @@ func (s Sequence) AlterDdl() string {
 		bld.WriteString(" no cycle")
 	}
 	if s.Ownedby != "" {
-		fmt.Fprintf(&bld, " owned by %s", s.Ownedby)
+		fmt.Fprintf(&bld, " owned by %s", quoteQualified(s.Ownedby))
 	} else {
 		bld.WriteString(" owned by none")
 	}
@@ -502,7 +502,7 @@ func (m Matview) GenerateDdl() string {
 	if m.Data != nil && !*m.Data {
 		data = "with no data"
 	}
-	return fmt.Sprintf("create materialized view if not exists %s (%s) as %s %s", m.Name, strings.Join(m.Columns, ","), m.Sql, data)
+	return fmt.Sprintf("create materialized view if not exists %s (%s) as %s %s", QuoteIdent(m.Name), quoteList(m.Columns, ","), m.Sql, data)
 }
 
 // ShadowDdl stands in for the materialized view in a shadow build, which creates everything as temporary objects -
@@ -512,8 +512,8 @@ func (m Matview) GenerateDdl() string {
 func (m Matview) ShadowDdl() []string {
 	scratch := MatviewShadowPrefix + m.Name
 	return []string{
-		fmt.Sprintf("create or replace view %s (%s) as %s", scratch, strings.Join(m.Columns, ","), m.Sql),
-		fmt.Sprintf("create table %s as select * from %s with no data", m.Name, scratch),
+		fmt.Sprintf("create or replace view %s (%s) as %s", QuoteIdent(scratch), quoteList(m.Columns, ","), m.Sql),
+		fmt.Sprintf("create table %s as select * from %s with no data", QuoteIdent(m.Name), QuoteIdent(scratch)),
 	}
 }
 
@@ -573,8 +573,8 @@ func ListFiles(path string, sfx string) ([]string, error) {
 func (v View) GenerateDdl() string {
 	var bld strings.Builder
 	bld.WriteString("create or replace view ")
-	bld.WriteString(v.Name)
-	fmt.Fprintf(&bld, " (%s) as %s", strings.Join(v.Columns, ","), v.Sql)
+	bld.WriteString(QuoteIdent(v.Name))
+	fmt.Fprintf(&bld, " (%s) as %s", quoteList(v.Columns, ","), v.Sql)
 	return bld.String()
 }
 
@@ -582,7 +582,7 @@ func (col Column) AlterStmt(tablename string, action string) string {
 	switch action {
 	case "add":
 		var bld strings.Builder
-		fmt.Fprintf(&bld, addColTmpl, tablename, col.Name)
+		fmt.Fprintf(&bld, addColTmpl, QuoteIdent(tablename), QuoteIdent(col.Name))
 		bld.WriteString(" ")
 		bld.WriteString(col.Datatype)
 		if !col.Nullable {
@@ -593,7 +593,7 @@ func (col Column) AlterStmt(tablename string, action string) string {
 		}
 		return bld.String()
 	case "drop":
-		return fmt.Sprintf(dropColTmpl, tablename, col.Name)
+		return fmt.Sprintf(dropColTmpl, QuoteIdent(tablename), QuoteIdent(col.Name))
 	}
 	return ""
 }
@@ -612,7 +612,7 @@ func (col Column) defaultBuilder() string {
 
 func (fk ForeignKey) AlterStmt(tableName string, action string) string {
 	var bld strings.Builder
-	fmt.Fprintf(&bld, fkddlTmpl, tableName, action, fk.Name, strings.Join(fk.Columns, ", "), fk.Reference.Table, strings.Join(fk.Reference.Columns, ", "))
+	fmt.Fprintf(&bld, fkddlTmpl, QuoteIdent(tableName), action, QuoteIdent(fk.Name), quoteList(fk.Columns, ", "), QuoteIdent(fk.Reference.Table), quoteList(fk.Reference.Columns, ", "))
 	if len(fk.UpdateRule) > 0 {
 		bld.WriteString(" on update ")
 		bld.WriteString(fk.UpdateRule)
@@ -630,17 +630,17 @@ func (idx Index) GenerateDdl(tableName string) string {
 		if idx.Unique {
 			unique = "unique"
 		}
-		idx.Ddl = fmt.Sprintf(idxddlTmpl, unique, idx.Name, tableName, strings.Join(idx.Columns, ", "))
+		idx.Ddl = fmt.Sprintf(idxddlTmpl, unique, QuoteIdent(idx.Name), QuoteIdent(tableName), quoteList(idx.Columns, ", "))
 	}
 	return idx.Ddl
 }
 
 func (cons Constraint) GenerateDdl(tableName string) string {
 	var bld strings.Builder
-	fmt.Fprintf(&bld, "alter table %s add constraint %s ", tableName, cons.Name)
+	fmt.Fprintf(&bld, "alter table %s add constraint %s ", QuoteIdent(tableName), QuoteIdent(cons.Name))
 	switch cons.Type {
 	case "unique":
-		fmt.Fprintf(&bld, "unique (%s)", strings.Join(cons.Columns, ","))
+		fmt.Fprintf(&bld, "unique (%s)", quoteList(cons.Columns, ","))
 	case "check":
 		fmt.Fprintf(&bld, "check (%s)", cons.Condition)
 	}
@@ -686,7 +686,7 @@ func (col ColumnDelta) Ddl() (string, error) {
 		}
 	}
 	builder := strings.Builder{}
-	fmt.Fprintf(&builder, "alter table %s alter column %s ", col.Reference, col.Name)
+	fmt.Fprintf(&builder, "alter table %s alter column %s ", QuoteIdent(col.Reference), QuoteIdent(col.Name))
 	if col.Mods.Nullable {
 		switch refColumn.Nullable {
 		case true:
@@ -765,7 +765,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 			}
 			return t.GenerateDdl(), nil
 		case "drop":
-			return fmt.Sprintf(dropTableTmpl, sd.Name), nil
+			return fmt.Sprintf(dropTableTmpl, QuoteIdent(sd.Name)), nil
 		}
 	case "view":
 		switch sd.Action {
@@ -776,14 +776,14 @@ func (sd SimpleDelta) Ddl() (string, error) {
 			}
 			return v.GenerateDdl(), nil
 		case "drop":
-			return fmt.Sprintf("drop view if exists %s", sd.Name), nil
+			return fmt.Sprintf("drop view if exists %s", QuoteIdent(sd.Name)), nil
 		}
 	case "column":
 		switch sd.Action {
 		case "drop":
-			return fmt.Sprintf(dropColTmpl, sd.Reference, sd.Name), nil
+			return fmt.Sprintf(dropColTmpl, QuoteIdent(sd.Reference), QuoteIdent(sd.Name)), nil
 		case "rename":
-			return fmt.Sprintf(colRenameTmpl, sd.Reference, sd.Name, sd.NewName), nil
+			return fmt.Sprintf(colRenameTmpl, QuoteIdent(sd.Reference), QuoteIdent(sd.Name), QuoteIdent(sd.NewName)), nil
 		case "add":
 			if len(sd.Reference) == 0 {
 				return "", missingDefinition("cannot add column %s as a simple delta without a reference value", sd.Name)
@@ -802,7 +802,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 	case "fk":
 		switch sd.Action {
 		case "drop":
-			return fmt.Sprintf(dropFkTmpl, sd.Reference, sd.Name), nil
+			return fmt.Sprintf(dropFkTmpl, QuoteIdent(sd.Reference), QuoteIdent(sd.Name)), nil
 		case "add":
 			if len(sd.Reference) > 0 {
 				t, err := sd.referenceTable()
@@ -820,7 +820,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 	case "pk":
 		switch sd.Action {
 		case "drop":
-			return fmt.Sprintf(dropFkTmpl, sd.Reference, sd.Name), nil
+			return fmt.Sprintf(dropFkTmpl, QuoteIdent(sd.Reference), QuoteIdent(sd.Name)), nil
 		case "add":
 			if len(sd.Reference) > 0 {
 				t, err := sd.referenceTable()
@@ -830,13 +830,13 @@ func (sd SimpleDelta) Ddl() (string, error) {
 				if len(t.PrimaryKey) == 0 {
 					fmt.Fprintf(os.Stderr, "Table %s did not have a primary key definition\n", sd.Reference)
 				}
-				return fmt.Sprintf("alter table %s add constraint %s primary key (%s)", sd.Reference, sd.Name, strings.Join(t.PrimaryKey, ", ")), nil
+				return fmt.Sprintf("alter table %s add constraint %s primary key (%s)", QuoteIdent(sd.Reference), QuoteIdent(sd.Name), quoteList(t.PrimaryKey, ", ")), nil
 			}
 		}
 	case "trigger":
 		switch sd.Action {
 		case "drop":
-			return fmt.Sprintf(dropTriggerTmpl, sd.Name, sd.Reference), nil
+			return fmt.Sprintf(dropTriggerTmpl, QuoteIdent(sd.Name), QuoteIdent(sd.Reference)), nil
 		case "add":
 			if len(sd.Reference) > 0 {
 				t, err := sd.referenceTable()
@@ -869,7 +869,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 	case "index":
 		switch sd.Action {
 		case "drop":
-			return fmt.Sprintf(dropIndexTmpl, sd.Name), nil
+			return fmt.Sprintf(dropIndexTmpl, QuoteIdent(sd.Name)), nil
 		case "add":
 			if len(sd.Reference) > 0 {
 				indexes, err := sd.referenceIndexes()
@@ -887,12 +887,12 @@ func (sd SimpleDelta) Ddl() (string, error) {
 	case "matview":
 		switch sd.Action {
 		case "drop":
-			return fmt.Sprintf("drop materialized view if exists %s", sd.Name), nil
+			return fmt.Sprintf("drop materialized view if exists %s", QuoteIdent(sd.Name)), nil
 		case "refresh":
 			if sd.Concurrently {
-				return fmt.Sprintf("refresh materialized view concurrently %s", sd.Name), nil
+				return fmt.Sprintf("refresh materialized view concurrently %s", QuoteIdent(sd.Name)), nil
 			}
-			return fmt.Sprintf("refresh materialized view %s", sd.Name), nil
+			return fmt.Sprintf("refresh materialized view %s", QuoteIdent(sd.Name)), nil
 		case "add":
 			mv, err := ParseMatviewByName(sd.Name)
 			if err != nil {
@@ -903,7 +903,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 	case "enum":
 		switch sd.Action {
 		case "drop":
-			return fmt.Sprintf("drop type if exists %s", sd.Name), nil
+			return fmt.Sprintf("drop type if exists %s", QuoteIdent(sd.Name)), nil
 		case "add", "alter":
 			e, err := ParseEnumByName(sd.Name)
 			if err != nil {
@@ -920,7 +920,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 	case "sequence":
 		switch sd.Action {
 		case "drop":
-			return fmt.Sprintf("drop sequence if exists %s", sd.Name), nil
+			return fmt.Sprintf("drop sequence if exists %s", QuoteIdent(sd.Name)), nil
 		case "add", "alter":
 			seq, err := ParseSequenceByName(sd.Name)
 			if err != nil {
@@ -943,7 +943,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 	case "constraint":
 		switch sd.Action {
 		case "drop":
-			return fmt.Sprintf("alter table %s drop constraint if exists %s", sd.Reference, sd.Name), nil
+			return fmt.Sprintf("alter table %s drop constraint if exists %s", QuoteIdent(sd.Reference), QuoteIdent(sd.Name)), nil
 		case "add":
 			if len(sd.Reference) > 0 {
 				t, err := sd.referenceTable()
@@ -1034,7 +1034,7 @@ func (t Table) Column(name string) (Column, bool) {
 }
 
 // CommentDdl sets the comment on a table, column (target is table.column), view, enum, sequence or matview - an empty
-// comment removes it.
+// comment removes it. The target's names are quoted where they need it.
 // The comment is quoted as a string literal
 func CommentDdl(on string, target string, comment string) string {
 	literal := "null"
@@ -1047,7 +1047,7 @@ func CommentDdl(on string, target string, comment string) string {
 	case "matview":
 		on = "materialized view"
 	}
-	return fmt.Sprintf("comment on %s %s is %s", on, target, literal)
+	return fmt.Sprintf("comment on %s %s is %s", on, quoteQualified(target), literal)
 }
 
 // QuoteLiteral quotes text as a postgres string literal. With standard_conforming_strings on (the default since
@@ -1211,12 +1211,12 @@ func (hook PrePostHook) HasPostHook() bool {
 func (t Table) GenerateDdl() string {
 	var bld strings.Builder
 	ignorePk := false
-	fmt.Fprintf(&bld, "create table if not exists %s (", t.Name)
+	fmt.Fprintf(&bld, "create table if not exists %s (", QuoteIdent(t.Name))
 	for i, col := range t.Columns {
 		if i > 0 {
 			bld.WriteString(",")
 		}
-		fmt.Fprintf(&bld, "%s %s", col.Name, col.Datatype)
+		fmt.Fprintf(&bld, "%s %s", QuoteIdent(col.Name), col.Datatype)
 		if col.Primarykey && col.Generate != "" {
 			fmt.Fprintf(&bld, " primary key generated %s as identity", col.Generate)
 			ignorePk = true
@@ -1229,7 +1229,7 @@ func (t Table) GenerateDdl() string {
 		}
 	}
 	if len(t.PrimaryKey) > 0 && !ignorePk {
-		fmt.Fprintf(&bld, " , constraint %s_pk primary key (%s)", t.Name, strings.Join(t.PrimaryKey, ", "))
+		fmt.Fprintf(&bld, " , constraint %s primary key (%s)", QuoteIdent(t.Name+"_pk"), quoteList(t.PrimaryKey, ", "))
 	}
 	bld.WriteString(") ")
 
