@@ -1,6 +1,8 @@
 package util
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -73,5 +75,30 @@ func testNewerVersionSortFunc(current SemanticVersion, all []string, expected []
 				t.Errorf("Expected path value at index %d to be %s but the actual value was %s", idx, expected[idx], path)
 			}
 		}
+	}
+}
+
+func TestWriteFileAtomic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.json")
+	if err := WriteFileAtomic(path, []byte("one"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if info, _ := os.Stat(path); info.Mode().Perm() != 0o640 {
+		t.Errorf("new file - EXPECTED mode 640  ACTUAL: %o", info.Mode().Perm())
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFileAtomic(path, []byte("two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	content, _ := os.ReadFile(path)
+	info, _ := os.Stat(path)
+	if string(content) != "two" || info.Mode().Perm() != 0o600 {
+		t.Errorf("existing file - EXPECTED content two with mode 600 kept  ACTUAL: %q %o", content, info.Mode().Perm())
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("EXPECTED no temporary files left  ACTUAL: %d entries", len(entries))
 	}
 }

@@ -93,8 +93,15 @@ not block every edit.
 without it) and fail with `412` if the file changed since it was read — e.g. edited by hand in the meantime.
 
 **Cascading edits.** Renaming a column also renames it in the table's primary key, indexes, constraints and foreign
-keys, and in other tables' foreign keys that reference it. Dropping a column that something references is rejected
-with the list of references, unless the request passes `"cascade": true`.
+keys, in other tables' foreign keys that reference it, and in the `ownedby` of sequences it owns. SQL that mentions the
+old name (index, constraint and trigger DDL, views) can't be rewritten safely, so it is returned as a warning.
+
+Dropping something other objects use is rejected with the list of what uses it, unless the request cascades - then
+those are dropped too, as postgres does, and each is listed in the warnings:
+- a column: the primary key, indexes, constraints and foreign keys on the table that include it, other tables' foreign
+  keys that reference it, and sequences it owns
+- a table: other tables' foreign keys that reference it, and sequences its columns own
+- a primary key: other tables' foreign keys that reference its columns
 
 ## API
 
@@ -117,12 +124,12 @@ Every write takes `If-Match` with the table's ETag and returns the updated table
 | Method and path | Edit |
 |---|---|
 | `POST /state/tables` | Create a table (body: a table object) |
-| `DELETE /state/tables/{table}` | Drop a table |
+| `DELETE /state/tables/{table}` | Drop a table (`?cascade=true` to drop what references it) |
 | `PATCH /state/tables/{table}` | Set or clear the table comment |
 | `POST /state/tables/{table}/columns` | Add a column; optional `backfill` (`expression` or `script`) for a `NOT NULL` column (see [hints](#intent-hints)) |
 | `PATCH /state/tables/{table}/columns/{column}` | Change `datatype`, `nullable`, `default`, `dfltfunc`, `comment`; changing `name` renames |
 | `DELETE /state/tables/{table}/columns/{column}` | Drop a column (`?cascade=true` to drop what references it) |
-| `PUT` / `DELETE /state/tables/{table}/primary-key` | Set or remove the primary key |
+| `PUT` / `DELETE /state/tables/{table}/primary-key` | Set or remove the primary key (`?cascade=true` to drop foreign keys that reference it) |
 | `PUT` / `DELETE /state/tables/{table}/foreign-keys/{name}` | Add or replace / remove a foreign key |
 | `PUT` / `DELETE /state/tables/{table}/indexes/{name}` | Add or replace / remove an index |
 | `PUT` / `DELETE /state/tables/{table}/constraints/{name}` | Add or replace / remove a constraint |
