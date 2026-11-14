@@ -6,9 +6,9 @@ import (
 	"skima/pkg/plan"
 )
 
-// PreviewSql plans the deltas as a changeset and returns the statements apply would run - a script step shows as a
-// comment naming the script, followed by its statement
-func PreviewSql(deltas []Delta) ([]string, error) {
+// PreviewSql plans the deltas as a changeset of the working directory's manifest and returns the statements apply
+// would run - a script step shows as a comment naming the script, followed by its statement
+func PreviewSql(workdir string, deltas []Delta) ([]string, error) {
 	statements := []string{}
 	if len(deltas) == 0 {
 		return statements, nil
@@ -26,7 +26,11 @@ func PreviewSql(deltas []Delta) ([]string, error) {
 	if err = os.WriteFile(path, content, 0o644); err != nil {
 		return statements, err
 	}
-	unit, _, err := plan.ForChangesetFile(path)
+	var unit plan.Unit
+	err = plan.InWorkdir(workdir, func() error {
+		unit, _, err = plan.ForChangesetFile(path)
+		return err
+	})
 	if err != nil {
 		return statements, err
 	}

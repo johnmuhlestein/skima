@@ -160,9 +160,37 @@ func ResolveBaseline(workdir string, ref string) (Baseline, error) {
 
 // ReadBaselineState reads the state files as they were at the baseline commit
 func ReadBaselineState(workdir string, baseline Baseline) (State, error) {
-	list, err := git(workdir, "ls-tree", "-r", "--name-only", baseline.Commit, "--", "state")
+	files, err := baselineFiles(workdir, baseline)
 	if err != nil {
 		return State{}, err
+	}
+	return parseState(files)
+}
+
+// ExportBaselineState writes the state files as they were at the baseline commit to dir/state - a manifest that plans
+// the baseline's state build
+func ExportBaselineState(workdir string, baseline Baseline, dir string) error {
+	files, err := baselineFiles(workdir, baseline)
+	if err != nil {
+		return err
+	}
+	for path, content := range files {
+		target := filepath.Join(dir, path)
+		if err = os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		if err = os.WriteFile(target, content, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// baselineFiles reads the files under state/ at the baseline commit, keyed by path relative to the working directory
+func baselineFiles(workdir string, baseline Baseline) (map[string][]byte, error) {
+	list, err := git(workdir, "ls-tree", "-r", "--name-only", baseline.Commit, "--", "state")
+	if err != nil {
+		return nil, err
 	}
 	files := map[string][]byte{}
 	for _, path := range strings.Split(list, "\n") {
@@ -173,11 +201,11 @@ func ReadBaselineState(workdir string, baseline Baseline) (State, error) {
 		cmd.Dir = workdir
 		content, err := cmd.Output()
 		if err != nil {
-			return State{}, fmt.Errorf("reading %s at %s: %w", path, short(baseline.Commit), err)
+			return nil, fmt.Errorf("reading %s at %s: %w", path, short(baseline.Commit), err)
 		}
 		files[filepath.FromSlash(path)] = content
 	}
-	return parseState(files)
+	return files, nil
 }
 
 // PendingChangesets lists changeset files under deltas/ that are not committed yet

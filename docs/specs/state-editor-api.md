@@ -264,14 +264,17 @@ must be dropped before and added after (by hand while views generate no deltas).
 
 ## Verify (needs a database)
 
-`POST /changes/verify` proves the generated changeset is right, using `pkg/drift`'s comparison. In a transaction that
-is always rolled back, it builds the baseline state, applies the generated changeset, and compares the resulting schema
-with a direct build of the current state. Any difference means the generator (or a hand-written part of the changeset)
-is wrong. It needs the database settings `drift` uses, changes nothing and takes no apply lock.
+`POST /changes/verify` (and `skima changeset diff --verify`) proves the generated changeset is right, using
+`pkg/drift`'s comparison. It builds the baseline state and applies the generated changeset on top, builds the current
+state directly, and compares the two schemas. Any difference means the generator (or a hand-written part of the
+changeset) is wrong; a changeset that fails to apply to the baseline is reported with the failing statement. It
+changes nothing and takes no apply lock.
 
-*Implementation risk:* `drift` builds state into temporary tables, which only needs the TEMP privilege. Applying a whole
-changeset on top may instead need a scratch schema created inside the rolled-back transaction, which needs the CREATE
-privilege on the database. Milestone 4 should settle which, before committing to verify running in CI and locally.
+*Resolved - privileges:* both builds run in a scratch schema created inside a transaction that is always rolled back, so
+the database user needs the CREATE privilege on the database. `drift`'s temporary-table build (TEMP privilege only)
+doesn't work here: it depends on the deployed schema - functions created in `pg_temp` are never found by unqualified
+name, so triggers need the real schema's functions, and views bind to the real materialized views. With only the
+scratch schema on the search path, verify builds exactly as apply does, and works on an empty database (e.g. in CI).
 
 ## CLI equivalents
 
@@ -321,7 +324,8 @@ Milestones, each a PR:
 
 1. **Draft file** — `.skima/draft.json` is local and git-ignored (skima writes `.skima/.gitignore`). Mitigated by the
    likely-rename warning.
-2. **Verify** — part of iteration 1 (milestone 4), including the CI equivalence tests.
+2. **Verify** — part of iteration 1 (milestone 4), including the CI equivalence tests. It needs the CREATE privilege
+   (see [Verify](#verify-needs-a-database)).
 3. **Port** — `7012` by default (registered only to an obscure service, "Talon Engine").
 4. **Backfill** — a SQL expression or a script file in `deltas/scripts`.
 

@@ -197,8 +197,8 @@ func TestTableObjects(t *testing.T) {
 	current.Comment = "documents"
 	result := Compare(state(projects, documents), state(projects, current), Draft{})
 	expectDeltas(t, result,
-		`{"object":"pk","action":"drop","name":"documents_pk","reference":"documents"}`,
 		`{"object":"fk","action":"drop","name":"documents_project_fk","reference":"documents"}`,
+		`{"object":"pk","action":"drop","name":"documents_pk","reference":"documents"}`,
 		`{"object":"index","action":"drop","name":"documents_file_loc_idx"}`,
 		`{"object":"pk","action":"add","name":"documents_pk","reference":"documents"}`,
 		`{"object":"constraint","action":"add","name":"documents_file_loc_unq","reference":"documents"}`,
@@ -281,5 +281,30 @@ func TestViewWarnings(t *testing.T) {
 	result := Compare(state(projects), cur, Draft{})
 	if !hasWarning(result, "changing the datatype of projects.name fails while view project_names uses it") || hasWarning(result, "unrelated") {
 		t.Errorf("EXPECTED a warning for project_names only  ACTUAL: %v", result.Warnings)
+	}
+}
+
+func TestPrimaryKeyWithDependentForeignKeys(t *testing.T) {
+	// projects' primary key changes: documents' foreign key that references it is dropped first and added back after
+	current := clone(projects)
+	current.PrimaryKey = []string{"id", "name"}
+	result := Compare(state(projects, documents), state(current, documents), Draft{})
+	expectDeltas(t, result,
+		`{"object":"fk","action":"drop","name":"documents_project_fk","reference":"documents"}`,
+		`{"object":"pk","action":"drop","name":"projects_pk","reference":"projects"}`,
+		`{"object":"pk","action":"add","name":"projects_pk","reference":"projects"}`,
+		`{"object":"fk","action":"add","name":"documents_project_fk","reference":"documents"}`)
+	if !hasWarning(result, "foreign key documents.documents_project_fk depends on the primary key of projects") {
+		t.Errorf("EXPECTED a warning about the dependent foreign key  ACTUAL: %v", result.Warnings)
+	}
+}
+
+func TestIdentityPrimaryKey(t *testing.T) {
+	// a table whose identity column is its primary key: the state build ignores primary-key, so it isn't compared
+	withIdentity := manifest.Table{Name: "events", Columns: []manifest.Column{{Name: "id", Datatype: "integer", Primarykey: true, Generate: "always"}}}
+	current := clone(withIdentity)
+	current.PrimaryKey = []string{"id"}
+	if result := Compare(state(withIdentity), state(current), Draft{}); len(result.Deltas) != 0 {
+		t.Errorf("EXPECTED no primary key deltas for an identity primary key  ACTUAL: %v", deltaLines(result.Deltas))
 	}
 }

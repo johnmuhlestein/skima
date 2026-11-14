@@ -71,6 +71,8 @@ type generator struct {
 	backfills map[string]*BackfillHint
 	used      map[string]bool
 	current   State
+	// base is the baseline's tables with the rename hints applied
+	base map[string]manifest.Table
 }
 
 // warnViews warns that postgres refuses a change while a view or materialized view depends on the table (or its
@@ -131,6 +133,7 @@ func Compare(base State, current State, draft Draft) Result {
 		}
 	}
 	renamedBase := applyRenames(base.Tables, renames)
+	g.base = renamedBase
 
 	for _, name := range sortedKeys(current.Tables) {
 		if _, ok := base.Tables[name]; !ok {
@@ -263,16 +266,20 @@ func (g *generator) compareTable(name string, base manifest.Table, current manif
 		}
 	}
 
-	if !slices.Equal(base.PrimaryKey, current.PrimaryKey) {
+	// an identity column that is the primary key replaces the table's primary-key - turning one on or off is reported
+	// as unsupported with the column, above
+	basePK, currentPK := effectivePrimaryKey(base), effectivePrimaryKey(current)
+	if !slices.Equal(basePK, currentPK) && !hasIdentityPrimaryKey(base) && !hasIdentityPrimaryKey(current) {
 		pkName := name + "_pk" // the name the state build gives it
-		if len(base.PrimaryKey) > 0 {
+		if len(basePK) > 0 {
 			g.delta(phaseDropDependents, Delta{Object: "pk", Action: "drop", Name: pkName, Reference: name})
+			g.rebuildDependentForeignKeys(name, basePK)
 		}
-		if len(current.PrimaryKey) > 0 {
+		if len(currentPK) > 0 {
 			g.delta(phaseAddDependents, Delta{Object: "pk", Action: "add", Name: pkName, Reference: name})
 		}
-		g.change(changeAction(len(base.PrimaryKey) > 0, len(current.PrimaryKey) > 0), "primary key", name,
-			fmt.Sprintf("(%s) to (%s)", strings.Join(base.PrimaryKey, ", "), strings.Join(current.PrimaryKey, ", ")))
+		g.change(changeAction(len(basePK) > 0, len(currentPK) > 0), "primary key", name,
+			fmt.Sprintf("(%s) to (%s)", strings.Join(basePK, ", "), strings.Join(currentPK, ", ")))
 	}
 
 	compareNamed(g, name, "foreign key", "fk", base.ForeignKeys, current.ForeignKeys, func(f manifest.ForeignKey) string { return f.Name }, phaseAddForeignKeys, true)
@@ -283,6 +290,42 @@ func (g *generator) compareTable(name string, base manifest.Table, current manif
 	if base.Comment != current.Comment {
 		g.comment("table", name, "", base.Comment, current.Comment)
 	}
+}
+
+// rebuildDependentForeignKeys drops the foreign keys that reference a table's primary key before it is dropped, and
+// adds them back once the new one exists - postgres refuses to drop a primary key that foreign keys depend on. A
+// foreign key that changed or was removed anyway is left to its own deltas
+func (g *generator) rebuildDependentForeignKeys(table string, primaryKey []string) {
+	for _, other := range sortedKeys(g.base) {
+		current, stillThere := g.current.Tables[other]
+		for _, fk := range g.base[other].ForeignKeys {
+			if fk.Reference.Table != table || !slices.Equal(fk.Reference.Columns, primaryKey) || !stillThere {
+				continue
+			}
+			i := slices.IndexFunc(current.ForeignKeys, func(c manifest.ForeignKey) bool { return c.Name == fk.Name })
+			if i < 0 || !reflect.DeepEqual(current.ForeignKeys[i], fk) {
+				continue
+			}
+			g.delta(phaseDropForeignKeys, Delta{Object: "fk", Action: "drop", Name: fk.Name, Reference: other})
+			g.delta(phaseAddForeignKeys, Delta{Object: "fk", Action: "add", Name: fk.Name, Reference: other})
+			g.warn("foreign key %s.%s depends on the primary key of %s - it is dropped before the primary key changes and added back after", other, fk.Name, table)
+		}
+	}
+}
+
+// effectivePrimaryKey is the primary key the state build creates: an identity column marked primarykey, or else the
+// table's primary-key
+func effectivePrimaryKey(t manifest.Table) []string {
+	for _, c := range t.Columns {
+		if c.Primarykey && c.Generate != "" {
+			return []string{c.Name}
+		}
+	}
+	return t.PrimaryKey
+}
+
+func hasIdentityPrimaryKey(t manifest.Table) bool {
+	return slices.ContainsFunc(t.Columns, func(c manifest.Column) bool { return c.Primarykey && c.Generate != "" })
 }
 
 // compareNamed compares a table's named objects of one kind: a removed one is dropped, an added one added, and a
@@ -301,7 +344,11 @@ func compareNamed[T any](g *generator, table string, what string, object string,
 		if dropNeedsTable {
 			d.Reference = table
 		}
-		g.delta(phaseDropDependents, d)
+		phase := phaseDropDependents
+		if object == "fk" {
+			phase = phaseDropForeignKeys
+		}
+		g.delta(phase, d)
 	}
 	add := func(n string) {
 		g.delta(addPhase, Delta{Object: object, Action: "add", Name: n, Reference: table})

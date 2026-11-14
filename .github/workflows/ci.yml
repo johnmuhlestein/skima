@@ -84,6 +84,15 @@ jobs:
       - name: Build
         run: go build -o skima .
 
+      - name: Generated changesets verify against postgres
+        # verify builds in a scratch schema that is rolled back, which needs the CREATE privilege - the superuser has it
+        env:
+          SKIMA_VERIFY_DATABASE: "1"
+          SKM_DBCONN_SCHEMA: public
+          SKM_DBCONN_USERNAME: postgres
+          SKM_DBCONN_PASSWORD: postgres
+        run: go test -count=1 -v ./pkg/verify
+
       - name: Bootstrap schema
         run: ./skima apply --bootstrap
         env:

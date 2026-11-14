@@ -291,6 +291,11 @@ func (e *Editor) SetPrimaryKey(table string, etag string, columns []string) (Res
 		if err != nil {
 			return err
 		}
+		for _, c := range t.Columns {
+			if c.Primarykey && c.Generate != "" {
+				return fmt.Errorf("%w: table '%s' has an identity primary key column, %s - the state build ignores primary-key for it", ErrExists, table, c.Name)
+			}
+		}
 		t.PrimaryKey = slices.Clone(columns)
 		return nil
 	})

@@ -1191,6 +1191,51 @@
           }
         }
       }
+    },
+    "/api/v1/changes/verify": {
+      "post": {
+        "summary": "Prove the generated changeset against the database",
+        "description": "Builds the baseline's state files and applies the generated changeset on top, builds the current state files, and compares the two as skima drift compares schemas. Both builds run in a scratch schema inside a transaction that is always rolled back - nothing is changed, no apply lock is taken, but the database user needs the CREATE privilege. A changeset that doesn't verify is still a 200, with verified false; 503 when the database can't be used.",
+        "parameters": [
+          {
+            "name": "baseline",
+            "in": "query",
+            "required": false,
+            "description": "A git ref to compare with, instead of the server's default baseline",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The verification",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Verify"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "503": {
+            "description": "The database can't be used to verify",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1531,6 +1576,62 @@
               "warnings": {
                 "type": "integer"
               }
+            }
+          }
+        }
+      },
+      "Verify": {
+        "type": "object",
+        "properties": {
+          "baseline": {
+            "type": "object"
+          },
+          "deltas": {
+            "type": "integer"
+          },
+          "verified": {
+            "type": "boolean",
+            "description": "The baseline with the changeset applied is exactly the current state"
+          },
+          "findings": {
+            "type": "array",
+            "description": "Differences as skima drift reports them - expected is the current state, actual the baseline with the changeset applied",
+            "items": {
+              "type": "object",
+              "properties": {
+                "change": {
+                  "enum": [
+                    "missing",
+                    "extra",
+                    "changed"
+                  ]
+                },
+                "object": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "attribute": {
+                  "type": "string"
+                },
+                "expected": {
+                  "type": "string"
+                },
+                "actual": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "applyError": {
+            "type": "string",
+            "description": "Set when the changeset failed to apply to the baseline"
+          },
+          "unsupported": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Change"
             }
           }
         }
