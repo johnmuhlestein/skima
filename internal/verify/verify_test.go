@@ -98,7 +98,7 @@ func TestVerifyColumnChanges(t *testing.T) {
 	e.must(e.ed.AddColumn("documents", e.etag("documents"), manifest.Column{Name: "notes", Datatype: "text", Nullable: true, Comment: "free text"}))
 	e.must(e.ed.AlterColumn("tags", e.etag("tags"), "label", editor.ColumnChanges{Datatype: str("varchar(100)"), Comment: str("shown on the tag")}))
 	e.must(e.ed.DropColumn("tags", e.etag("tags"), "color", false))
-	e.must(e.ed.AlterColumn("projects", e.etag("projects"), "name", editor.ColumnChanges{Default: str("unnamed")}))
+	e.must(e.ed.AlterColumn("projects", e.etag("projects"), "name", editor.ColumnChanges{Default: str("it's unnamed")}))
 	e.must(e.ed.SetTableComment("projects", e.etag("projects"), "projects documents belong to"))
 	expectVerified(t, workdir, baseline, e.draft)
 }

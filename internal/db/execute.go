@@ -118,6 +118,16 @@ func (e executor) retryViews(views []plan.Step) int {
 			break
 		}
 	}
+	// the views still missing a relation are failures - their attempts so far are recorded as 'retrying'
+	for _, view := range views {
+		stmtType := view.Record.Type
+		if view.Record.FailType != "" {
+			stmtType = view.Record.FailType
+		}
+		stmtId, err := e.record(e.history, stmtType, "failed", "still references a relation that does not exist after retrying")
+		fmt.Fprintf(e.errOut, "FAILURE: %s still references a relation that does not exist - Statement ID: %d\n", stepName(view), stmtId)
+		checkErr(err, "Unable to record the statement history for "+stepName(view))
+	}
 	return failures + len(views)
 }
 
@@ -196,10 +206,15 @@ func (e executor) failed(step plan.Step, idx int, sql string, execErr error, pgE
 	if step.Record.FailType != "" {
 		stmtType = step.Record.FailType
 	}
-	stmtId, err := e.record(e.history, stmtType, "failed", execErr.Error())
 	if pgErr != nil && pgErr.Code == codeUndefinedTable && step.Retryable {
-		fmt.Fprintf(e.errOut, "  %s references a relation that does not exist yet: %s\n", stepName(step), pgErr.Message)
+		// retried once the steps planned with it have run - recorded as 'retrying', so a view that succeeds on retry
+		// leaves no failed row in a successful run
+		stmtId, err := e.record(e.history, stmtType, "retrying", execErr.Error())
+		fmt.Fprintf(e.out, "RETRYING: %s references a relation that does not exist yet: %s - Statement ID: %d\n", stepName(step), pgErr.Message, stmtId)
+		checkErr(err, "Unable to record the statement history for "+stepName(step))
+		return
 	}
+	stmtId, err := e.record(e.history, stmtType, "failed", execErr.Error())
 	if step.Script == "" {
 		fmt.Fprintln(e.out, sql) // a file's statements are not printed - it is named instead
 	}

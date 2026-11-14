@@ -491,3 +491,19 @@ func TestParseChangeSet_MalformedDelta(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultStringLiteral(t *testing.T) {
+	for _, tc := range []struct {
+		col  Column
+		want string
+	}{
+		{Column{Datatype: "text", Default: "O'Brien"}, " default 'O''Brien'"},
+		{Column{Datatype: "text", Default: "draft"}, " default 'draft'"},
+		{Column{Datatype: "integer", Default: "0"}, " default 0"},
+		{Column{Datatype: "timestamptz", Default: "now()", Dfltfunc: true}, " default now()"},
+	} {
+		if got := tc.col.defaultBuilder(); got != tc.want {
+			t.Errorf("%+v - EXPECTED %q  ACTUAL: %q", tc.col, tc.want, got)
+		}
+	}
+}

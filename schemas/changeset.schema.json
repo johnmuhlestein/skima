@@ -10,7 +10,7 @@
     "$schema": { "type": "string" },
     "version": {
       "type": "string",
-      "description": "Informational only - the changeset version is taken from the file name"
+      "description": "Optional - the version applied is always the file name's; validation reports a version here that disagrees with it"
     },
     "description": { "type": "string" },
     "transaction": {

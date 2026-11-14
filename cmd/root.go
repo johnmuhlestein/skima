@@ -43,9 +43,9 @@ func init() {
 	rootCmd.PersistentFlags().String("dbdb", "", "The database name within the instance to connect to - overrides the config file value")
 	rootCmd.PersistentFlags().String("dbschema", "", "The database schema name to connect to - overrides the config file value")
 	rootCmd.PersistentFlags().String("dbusername", "", "The username to use to log into the database - overrides the config file value")
-	rootCmd.PersistentFlags().String("dbpassword", "", "To pass in a database password from the command line")
-	rootCmd.PersistentFlags().String("dbsuperuser", "", "The superuser for the database - unlike the standard user, this user can work across all schemas including the public schema (required if dbusernamepwd is set")
-	rootCmd.PersistentFlags().String("dbsuperuserpwd", "", "Password for the database superuser (required if dbusername is set")
+	rootCmd.PersistentFlags().String("dbpassword", "", "The database user's password - visible to other users in the process list, so prefer SKM_DBCONN_PASSWORD or the config file")
+	rootCmd.PersistentFlags().String("dbsuperuser", "", "A superuser for apply --bootstrap, which creates the user and schema - set together with --dbsuperuserpwd")
+	rootCmd.PersistentFlags().String("dbsuperuserpwd", "", "The superuser's password - visible in the process list, so prefer SKM_DBCONN_SUPERUSERPWD or the config file")
 	rootCmd.MarkFlagsRequiredTogether("dbsuperuser", "dbsuperuserpwd")
 	cobra.CheckErr(viper.BindPFlag("dbconn.connstring", rootCmd.PersistentFlags().Lookup("dbconnstring")))
 	cobra.CheckErr(viper.BindPFlag("dbconn.port", rootCmd.PersistentFlags().Lookup("dbport")))
@@ -76,6 +76,14 @@ func initConfig() {
 		viper.AddConfigPath(".")
 		viper.SetConfigType("yaml")
 		viper.SetConfigName(".skima")
+	}
+
+	// a password on the command line can be read by any user on the machine (ps, /proc) and lands in shell history
+	for _, flag := range []string{"dbpassword", "dbsuperuserpwd"} {
+		if rootCmd.PersistentFlags().Changed(flag) {
+			fmt.Fprintf(os.Stderr, "WARNING: --%s is visible to other users in the process list - set %s or put it in the config file instead\n",
+				flag, map[string]string{"dbpassword": "SKM_DBCONN_PASSWORD", "dbsuperuserpwd": "SKM_DBCONN_SUPERUSERPWD"}[flag])
+		}
 	}
 
 	viper.SetEnvPrefix("skm")

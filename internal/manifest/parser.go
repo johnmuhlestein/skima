@@ -604,7 +604,7 @@ func (col Column) defaultBuilder() string {
 		if col.Dfltfunc || col.Datatype == "bool" || numericType.Has(col.Datatype) {
 			return fmt.Sprintf(" default %s", col.Default)
 		} else {
-			return fmt.Sprintf(" default '%s'", col.Default)
+			return fmt.Sprintf(" default '%s'", strings.ReplaceAll(col.Default, "'", "''")) // a string literal
 		}
 	}
 	return ""
