@@ -369,12 +369,30 @@ Warnings flag dropped tables and columns (their data is lost), datatype changes,
 `NOT NULL` columns with no default (adding one fails on a table with rows), and changes postgres refuses while a view
 depends on the column or table.
 
+`skima changeset build` writes the generated changeset as the next changeset in `deltas/` - the next patch version, or
+`--bump minor|major`, or an explicit `--version` - validates it as apply would, and clears the hints below. Commit it
+together with the state changes it covers: that moves the baseline, so `skima changeset diff` then shows no changes.
+
+```
+skima changeset build --description "document status"
+skima changeset build --description "billing tables" --bump minor
+```
+
+The build is refused when a changeset is not committed yet (building again would repeat its deltas), when nothing
+changed, and when some changes generate no deltas unless `--acknowledge-unsupported` is given - then add those deltas to
+the changeset by hand. `--no-transaction` writes `"transaction": false`.
+
 A diff can't infer some intent, so skima keeps it as hints in `.skima/draft.json` (git-ignored):
-* **renames** - a renamed column looks like a dropped and an added one, which would lose its data. With a rename hint
-  the changeset renames it. Without one, a column dropped and another of the same datatype added on the same table gets
-  a warning that it looks like a rename
-* **backfills** - a new `NOT NULL` column on a table with rows is added as nullable, filled from a SQL expression or a
-  script in `deltas/scripts`, then made `NOT NULL`
+* **renames** - a renamed column looks like a dropped and an added one, which would lose its data. `skima changeset
+  rename <table> <from> <to>` renames the column in the state files - in the table's keys, indexes and constraints,
+  other tables' foreign keys and owned sequences too - and records the rename, so the changeset renames it. If the
+  state file was already renamed by hand, it only records the rename. Without a rename hint, a column dropped and
+  another of the same datatype added on the same table gets a warning that it looks like a rename
+* **backfills** - a new `NOT NULL` column on a table with rows can't just be added. `skima changeset backfill <table>
+  <column> --expression "<sql>"` (or `--script <file>` in `deltas/scripts`) makes the changeset add it as nullable,
+  fill it, then make it `NOT NULL`
+
+`skima changeset hints` lists the recorded hints, and `--clear` removes them.
 
 ### Formatting the state files
 `skima manifest fmt` rewrites state files in one canonical format: 2-space indent, properties in the order this README
