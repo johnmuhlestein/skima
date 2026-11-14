@@ -347,6 +347,17 @@ Drift in schema app1 (deployed 1.0.3): 3 differences
   ```
 * `--output=json` gives machine readable results. With `--detailed-exitcode` the exit code is 2 when there is drift
 
+### Formatting the state files
+`skima manifest fmt` rewrites state files in one canonical format: 2-space indent, properties in the order this README
+documents them, optional properties left out when unset, and `nullable` always written. Formatting never changes what a
+file means - only how it is laid out - and a file's `$schema` is kept.
+
+* `skima manifest fmt` formats every state file in the working directory; `skima manifest fmt <file>...` formats only those
+* `--check` changes nothing: it lists the files that are not formatted and exits with code 1, for CI
+* invalid files are reported and left unchanged - fix them first (`skima manifest validate`), since parsing them could drop
+  content such as a misspelled property
+* changesets are not formatted
+
 ### Validating the manifest
 Every manifest file is checked against a JSON schema for its kind - tables, views and changesets. Validation catches
 misspelled or unknown properties (property names are case sensitive and lowercase, as documented below), missing required
