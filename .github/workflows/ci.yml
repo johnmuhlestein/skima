@@ -139,6 +139,35 @@ jobs:
           ./skima plan --detailed-exitcode > /dev/null || status=$?
           [ "$status" -eq 2 ]
 
+      - name: Rerunning the state sql files leaves the changesets pending
+        env:
+          SKM_WORKDIR: testdata/ci-next
+        run: |
+          # an apply --sql run is recorded at the manifest's version, but it applies no changesets
+          ./skima apply --sql
+          status=0
+          ./skima plan --detailed-exitcode > /dev/null || status=$?
+          [ "$status" -eq 2 ]
+
+      - name: A failed statement is recorded whole
+        env:
+          SKM_WORKDIR: testdata/ci-failing
+        run: |
+          rm -rf testdata/ci-failing && cp -R testdata/ci-next testdata/ci-failing
+          # longer than 200 bytes, with multi-byte characters
+          stmt="select '$(printf 'é%.0s' $(seq 1 150))' from no_such_table"
+          jq -n --arg stmt "$stmt" '{version: "1.0.2", description: "fails", deltas: [{object: "script", description: "fails", sql: [$stmt]}]}' > testdata/ci-failing/deltas/v1_0_2.json
+          status=0
+          ./skima apply || status=$?
+          [ "$status" -eq 1 ]
+          recorded=$(psql -h localhost -U postgres -d postgres -tAc \
+            "select s.status || ':' || (s.description like '%no_such_table') from ci_schema.skima_schema_statements s join ci_schema.skima_schema_history h using (run_id) where h.delta_file = 'v1_0_2.json' and h.status = 'rolled back'")
+          echo "failed statement: $recorded"
+          [ "$recorded" = "failed:true" ]
+          # the failed run is cleaned up so the next release's checks see only its own runs
+          psql -h localhost -U postgres -d postgres -c "delete from ci_schema.skima_schema_history where status <> 'success'"
+          rm -rf testdata/ci-failing
+
       - name: Apply the next release
         env:
           SKM_WORKDIR: testdata/ci-next

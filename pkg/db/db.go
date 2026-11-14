@@ -23,7 +23,10 @@ import (
 
 const histInsert = "insert into skima_schema_history (schema_version, apply_type, status, delta_file) values ($1,$2,$3,$4) returning run_id"
 const histUpdateComp = "update skima_schema_history set status = $1, completion_timestamp = now() where run_id = $2"
-const histLatest = "select run_id, schema_version, apply_start_timestamp, completion_timestamp, apply_type, status, coalesce(delta_file, '') from skima_schema_history where run_id = (select max(run_id) from skima_schema_history where status in ('complete','success'))"
+
+// an apply --sql run only reruns the state sql files - it applies no changesets, so it never decides the deployed
+// version. Counting it would make the changesets newer than the deployed version look applied
+const histLatest = "select run_id, schema_version, apply_start_timestamp, completion_timestamp, apply_type, status, coalesce(delta_file, '') from skima_schema_history where run_id = (select max(run_id) from skima_schema_history where status in ('complete','success') and apply_type <> 'sql')"
 const histStatements = "select run_id, stmt_id, stmt_type, status, coalesce(description,'') from skima_schema_statements where run_id = $1 order by stmt_id"
 
 const histStmtRolledBack = "update skima_schema_statements set status = 'rolled back' where run_id = $1 and status = 'success'"
@@ -362,17 +365,16 @@ func recordStatementHist(history *ApplyHistory, stmtType string, status string, 
 	}
 	defer conn.Release()
 	var stmtId int
-	//TODO: no need to do this check once we change the datatype to "text"
-	if len(desc) > 200 {
-		desc = desc[:200]
-	}
-	conn.QueryRow(context.Background(), histStmtInsert, history.RunId, stmtType, status, desc).Scan(&stmtId)
+	// the description column is text, so it is recorded whole - and invalid UTF-8 (e.g. from a sql file in another
+	// encoding) is replaced, since postgres would reject the row
+	desc = strings.ToValidUTF8(desc, "�")
+	err = conn.QueryRow(context.Background(), histStmtInsert, history.RunId, stmtType, status, desc).Scan(&stmtId)
 	stmtHist := ApplyStatement{StatementId: stmtId, StatementType: stmtType, Status: status, Description: desc}
 	history.Statements = append(history.Statements, stmtHist)
 	if status != "success" {
 		history.Status = "failed"
 	}
-	return stmtId, nil
+	return stmtId, err
 }
 
 // Bootstrap uses the superuser to create the application role and schema, grant the role privileges on the schema and

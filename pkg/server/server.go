@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"skima/pkg/changes"
 	"skima/pkg/editor"
 	"strings"
@@ -66,8 +68,32 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if !safeMethod(r.Method) && s.crossOrigin(r) {
+		// the API has no authentication, so a page on another site must not be able to change anything through the
+		// user's browser (CSRF) - browsers send Origin with every cross-origin request that isn't a GET or HEAD
+		writeError(w, http.StatusForbidden, "forbidden_origin", fmt.Sprintf("requests from origin %q are not allowed - start skima serve with --cors-origin to allow a UI at another origin", r.Header.Get("Origin")), nil)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 	s.mux.ServeHTTP(w, r)
+}
+
+func safeMethod(method string) bool {
+	return method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions
+}
+
+// crossOrigin reports whether a browser sent the request from a page at another origin than the API's own or the
+// allowed --cors-origin. Requests without an Origin header don't come from a page - e.g. curl
+func (s *Server) crossOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return r.Header.Get("Sec-Fetch-Site") == "cross-site"
+	}
+	if s.corsOrigin != "" && origin == s.corsOrigin {
+		return false
+	}
+	u, err := url.Parse(origin)
+	return err != nil || u.Host != r.Host
 }
 
 func localHost(host string) bool {
@@ -147,6 +173,12 @@ func writeFailure(w http.ResponseWriter, err error) {
 // decode reads a JSON request body into v, rejecting unknown properties - a misspelled property is an error rather
 // than silently ignored
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	// a page on another site can send text/plain or form bodies without the browser asking first (a CORS preflight),
+	// but not application/json
+	if mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mediaType != "application/json" {
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "send the request body as Content-Type: application/json", nil)
+		return false
+	}
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {

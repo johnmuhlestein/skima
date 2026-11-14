@@ -453,7 +453,8 @@ The full description is at `/api/v1/openapi.json`. Request and response bodies u
 * Renaming a column through the API, or adding a `NOT NULL` column with `"backfill": {"expression": ...}` (or `"script"`),
   records the hint the changeset needs.
 * The API has no authentication: it binds to `127.0.0.1` and only serves requests addressed to `localhost`, `127.0.0.1` or
-  `[::1]`. `--cors-origin` allows a browser UI at another origin to call it.
+  `[::1]`. `--cors-origin` allows a browser UI at another origin to call it. Request bodies must be `Content-Type: application/json`, and
+  a request that changes anything is refused (`403`) when a browser sends it from any other origin.
 
 ### Formatting the state files
 `skima manifest fmt` rewrites state files in one canonical format: 2-space indent, properties in the order this README
@@ -530,7 +531,8 @@ skima records every apply run in two tables in the managed schema
 * `skima_schema_statements` - one row per statement executed during a run, with its status and a description. A run
   records a `success` row for each statement in its plan (see [Planning an apply](#planning-an-apply))
 
-The most recent run with a `success` (or `complete` for a baseline) status determines the currently deployed version. A changeset
+The most recent run with a `success` (or `complete` for a baseline) status determines the currently deployed version. An `apply --sql` run is
+not counted - it reruns the state sql files but applies no changesets. A changeset
 that failed and was rolled back is recorded as `rolled back`, and the statements it had already run are marked `rolled back` too.
 
 Only one `skima apply` runs against a schema at a time. Each apply takes a postgres advisory lock for the schema, so if two deploy jobs
