@@ -102,3 +102,29 @@ func TestWriteFileAtomic(t *testing.T) {
 		t.Errorf("EXPECTED no temporary files left  ACTUAL: %d entries", len(entries))
 	}
 }
+
+func TestBumpAndFileName(t *testing.T) {
+	cases := []struct{ from, part, next, file string }{
+		{"1.0.3", "patch", "1.0.4", "v1_0_4.json"},
+		{"1.0.3", "minor", "1.1.0", "v1_1_0.json"},
+		{"1.4.3", "major", "2.0.0", "v2_0_0.json"},
+		{"1.0.4-rc.1", "patch", "1.0.4", "v1_0_4.json"},
+		{"1.0.4-rc.1", "minor", "1.1.0", "v1_1_0.json"},
+	}
+	for _, c := range cases {
+		next, err := ExtractVersion(c.from).Bump(c.part)
+		if err != nil || next.String() != c.next || next.FileName() != c.file {
+			t.Errorf("%s bump %s - EXPECTED %s (%s)  ACTUAL: %s (%s) %v", c.from, c.part, c.next, c.file, next.String(), next.FileName(), err)
+		}
+	}
+	if _, err := ExtractVersion("1.0.0").Bump("build"); err == nil {
+		t.Error("EXPECTED an error for an unknown part")
+	}
+	// file names round-trip through ExtractVersion
+	for _, version := range []string{"1.0.4", "1.1.0-rc.1", "2.0.0-beta", "0.9.12"} {
+		v := ExtractVersion(version)
+		if again := ExtractVersion(v.FileName()); again.Compare(v) != 0 || again.String() != v.String() {
+			t.Errorf("%s - file name %s parses back as %s", version, v.FileName(), again.String())
+		}
+	}
+}

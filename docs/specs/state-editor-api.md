@@ -278,10 +278,18 @@ privilege on the database. Milestone 4 should settle which, before committing to
 The change detection and build engine is a package the server and the CLI share:
 
 ```
-skima changeset diff  [--baseline <ref>] [--output json] [--check]
-skima changeset build --description "..." [--bump patch|minor|major | --version X.Y.Z] [--acknowledge-unsupported]
-skima manifest fmt    [file...]
+skima changeset diff     [--baseline <ref>] [--output json] [--check]
+skima changeset build    --description "..." [--bump patch|minor|major | --version X.Y.Z] [--acknowledge-unsupported] [--no-transaction]
+skima changeset rename   <table> <from> <to>
+skima changeset backfill <table> <column> (--expression <sql> | --script <file>)
+skima changeset hints    [--clear]
+skima manifest fmt       [file...]
 ```
+
+`rename` renames the column in the state files through the editor (or, if they were renamed by hand, only records the
+rename) and `backfill` records a backfill - the CLI ways to record the hints the API records as it edits. A build is
+refused while a changeset is not committed yet: the baseline only moves when it is, so building again would repeat its
+deltas.
 
 `skima changeset diff --check` exits 1 when the state has changed since the baseline but no changeset covers it —
 useful in CI to catch a state edit pushed without its changeset.

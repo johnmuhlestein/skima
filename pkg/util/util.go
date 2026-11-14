@@ -232,3 +232,32 @@ func (s Set[T]) Equals(other Set[T]) bool {
 	}
 	return true
 }
+
+// Bump returns the next major, minor or patch version. A pre-release's next patch version is its release, e.g. the
+// patch after 1.0.4-rc.1 is 1.0.4
+func (v SemanticVersion) Bump(part string) (SemanticVersion, error) {
+	switch part {
+	case "major":
+		return SemanticVersion{major: v.major + 1}, nil
+	case "minor":
+		return SemanticVersion{major: v.major, minor: v.minor + 1}, nil
+	case "patch":
+		if v.pre != "" {
+			return SemanticVersion{major: v.major, minor: v.minor, patch: v.patch}, nil
+		}
+		return SemanticVersion{major: v.major, minor: v.minor, patch: v.patch + 1}, nil
+	}
+	return v, fmt.Errorf("unknown version part %q - use major, minor or patch", part)
+}
+
+// FileName is the changeset file name for the version, e.g. v1_0_4.json or v1_1_0-rc_1.json
+func (v SemanticVersion) FileName() string {
+	name := fmt.Sprintf("v%d_%d_%d", v.major, v.minor, v.patch)
+	if v.pre != "" {
+		name += "-" + v.pre
+		if v.itr > 0 {
+			name += "_" + strconv.Itoa(v.itr)
+		}
+	}
+	return name + ".json"
+}

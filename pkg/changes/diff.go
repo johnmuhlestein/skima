@@ -225,7 +225,7 @@ func (g *generator) compareTable(name string, base manifest.Table, current manif
 	for _, r := range removed {
 		for _, a := range added {
 			if strings.EqualFold(r.Datatype, a.Datatype) {
-				g.warn("%s.%s was removed and %s.%s added with the same datatype - if it is a rename, record it as one, or the data in %s is lost", name, r.Name, name, a.Name, r.Name)
+				g.warn("%s.%s was removed and %s.%s added with the same datatype - if it is a rename, record it (skima changeset rename %s %s %s), or the data in %s is lost", name, r.Name, name, a.Name, name, r.Name, a.Name, r.Name)
 			}
 		}
 	}
