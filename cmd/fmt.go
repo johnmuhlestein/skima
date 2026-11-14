@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"skima/pkg/manifest"
+	"skima/pkg/util"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -67,7 +67,7 @@ Example:
 				formatted++
 				fmt.Printf("unformatted  %s\n", displayPath(path))
 			default:
-				if err := writeFileAtomic(path, content); err != nil {
+				if err := util.WriteFileAtomic(path, content, 0o644); err != nil {
 					failed++
 					fmt.Fprintf(os.Stderr, "ERROR    %s: %s\n", displayPath(path), err)
 					continue
@@ -94,28 +94,4 @@ Example:
 func init() {
 	manifestCmd.AddCommand(fmtCmd)
 	fmtCmd.Flags().BoolVar(&fmtCheck, "check", false, "List the files that are not formatted without changing them - the exit code is 1 if there are any")
-}
-
-// writeFileAtomic replaces a file's content by writing a temporary file next to it and renaming it over the original,
-// so the file is never left half written. The original's permissions are kept
-func writeFileAtomic(path string, content []byte) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name()) // a no-op once renamed
-	if _, err = tmp.Write(content); err == nil {
-		err = tmp.Chmod(info.Mode().Perm())
-	}
-	if closeErr := tmp.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
 }
