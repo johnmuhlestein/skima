@@ -45,12 +45,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # the latest Go: golangci-lint v2.15.0 needs go >= 1.26 to build, newer than the module's minimum
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: stable
           cache: true
 
-      # the pinned version in the Makefile, built with the module's Go - the same lint as make lint locally
+      # the pinned version in the Makefile - the same lint as make lint locally
       - name: golangci-lint
         run: make lint
 
