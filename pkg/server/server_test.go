@@ -288,3 +288,9 @@ func TestBodyLimit(t *testing.T) {
 	big := `{"name":"t","columns":[{"name":"c","datatype":"text","comment":"` + string(bytes.Repeat([]byte("x"), maxBody)) + `"}]}`
 	expect(t, call(t, s, "POST", "/api/v1/state/tables", big), 413, "too_large")
 }
+
+func TestVerifyNeedsADatabase(t *testing.T) {
+	s, _ := fixture(t, Options{})
+	viper.Set("dbconn.connstring", "")
+	expect(t, call(t, s, "POST", "/api/v1/changes/verify", ""), 503, "verify_unavailable")
+}

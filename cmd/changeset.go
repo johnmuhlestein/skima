@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"skima/pkg/changes"
+	"skima/pkg/drift"
+	"skima/pkg/verify"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -13,6 +15,7 @@ import (
 
 var baselineRef string
 var diffCheck bool
+var diffVerify bool
 
 // changesetCmd groups the commands that generate changesets from the state files
 var changesetCmd = &cobra.Command{
@@ -44,11 +47,17 @@ deltas are written by hand for now.
 With --check nothing is shown unless the state changed: the exit code is 1 when it did, for CI - a state change
 pushed without its changeset.
 
+With --verify the changeset is proven against the database configured for skima: the baseline's state files are built
+and the changeset applied on top, and the result must be exactly what the current state files build. Both builds run
+in a scratch schema created inside a transaction that is always rolled back - nothing is changed and no apply lock is
+taken, but the database user needs the CREATE privilege on the database. The exit code is 1 when it doesn't verify.
+
 Example:
   skima changeset diff
   skima changeset diff --baseline origin/main
   skima changeset diff --output=json
-  skima changeset diff --check`,
+  skima changeset diff --check
+  skima changeset diff --verify`,
 	Run: func(cmd *cobra.Command, args []string) {
 		workdir := viper.GetString("workdir")
 		baseline, err := changes.ResolveBaseline(workdir, baselineRef)
@@ -66,12 +75,23 @@ Example:
 			fmt.Fprintln(os.Stderr, "ERROR:", err)
 			os.Exit(1)
 		}
-		statements, planErr := changes.PreviewSql(result.Deltas)
+		statements, planErr := changes.PreviewSql(workdir, result.Deltas)
+		var verified *verify.Report
+		if diffVerify && len(result.Deltas) > 0 {
+			report, err := verify.Deltas(workdir, baseline, result.Deltas)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "ERROR: unable to verify the changeset:", err)
+				os.Exit(1)
+			}
+			report.Unsupported = result.Unsupported
+			verified = &report
+		}
 		if output == "json" {
 			report := struct {
 				changes.Result
-				Sql []string `json:"sql"`
-			}{result, statements}
+				Sql    []string       `json:"sql"`
+				Verify *verify.Report `json:"verify,omitempty"`
+			}{result, statements, verified}
 			jsonOutput, err := json.MarshalIndent(report, "", "  ")
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "Unable to marshal the diff into JSON", err)
@@ -80,8 +100,11 @@ Example:
 			fmt.Println(string(jsonOutput))
 		} else if !diffCheck || result.HasChanges() {
 			printDiff(result, statements, planErr)
+			if verified != nil {
+				printVerify(*verified)
+			}
 		}
-		if diffCheck && result.HasChanges() {
+		if (diffCheck && result.HasChanges()) || (verified != nil && !verified.Verified) {
 			os.Exit(1)
 		}
 	},
@@ -91,6 +114,7 @@ func init() {
 	rootCmd.AddCommand(changesetCmd)
 	changesetCmd.PersistentFlags().StringVar(&baselineRef, "baseline", "", "The git ref to compare with - by default the last commit that changed the deltas directory")
 	changesetCmd.AddCommand(changesetDiffCmd)
+	changesetDiffCmd.Flags().BoolVar(&diffVerify, "verify", false, "Prove the changeset against the database: the baseline's state with the changeset applied must equal the current state - the exit code is 1 when it doesn't")
 	changesetDiffCmd.Flags().BoolVar(&diffCheck, "check", false, "Show nothing unless the state changed since the baseline - the exit code is 1 when it did")
 }
 
@@ -137,6 +161,36 @@ func printDiff(result changes.Result, statements []string, planErr error) {
 		}
 		for _, s := range statements {
 			fmt.Printf("  %s;\n", strings.TrimSuffix(strings.TrimSpace(s), ";"))
+		}
+	}
+}
+
+// printVerify shows whether the changeset brings the baseline to the current state - differences as skima drift shows
+// them, with "expected" from the current state files and "actual" from the baseline with the changeset applied
+func printVerify(report verify.Report) {
+	fmt.Println("\nVerify:")
+	switch {
+	case report.ApplyError != "":
+		fmt.Println("  NOT VERIFIED - the changeset failed to apply to the baseline:")
+		for _, line := range strings.Split(report.ApplyError, "\n") {
+			fmt.Println("    " + line)
+		}
+	case report.Verified:
+		fmt.Println("  verified - the baseline with the changeset applied is exactly the current state")
+	default:
+		differences := fmt.Sprintf("%d differences", len(report.Findings))
+		if len(report.Findings) == 1 {
+			differences = "1 difference"
+		}
+		fmt.Printf("  NOT VERIFIED - %s between the current state (expected) and the baseline with the changeset applied (actual):\n", differences)
+		var out strings.Builder
+		drift.Render(&out, drift.Report{Findings: report.Findings})
+		lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+		for _, line := range lines[1:] { // the first line is drift's summary
+			fmt.Println("  " + line)
+		}
+		if len(report.Unsupported) > 0 {
+			fmt.Println("  Unsupported changes generate no deltas, so they show up here until their deltas are written by hand")
 		}
 	}
 }

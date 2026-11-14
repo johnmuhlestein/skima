@@ -369,6 +369,13 @@ Warnings flag dropped tables and columns (their data is lost), datatype changes,
 `NOT NULL` columns with no default (adding one fails on a table with rows), and changes postgres refuses while a view
 depends on the column or table.
 
+`skima changeset diff --verify` proves the changeset against the database configured for skima: it builds the
+baseline's state files, applies the changeset on top, and checks the result is exactly what the current state files
+build - differences are shown as `skima drift` shows them, and the exit code is 1. Both builds run in a scratch schema
+created inside a transaction that is always rolled back, so nothing is changed, no apply lock is taken, and an empty
+database works - but the database user needs the `CREATE` privilege on the database. Changes that generate no deltas
+(views, enums, ...) show up as differences until their deltas are written by hand.
+
 `skima changeset build` writes the generated changeset as the next changeset in `deltas/` - the next patch version, or
 `--bump minor|major`, or an explicit `--version` - validates it as apply would, and clears the hints below. Commit it
 together with the state changes it covers: that moves the baseline, so `skima changeset diff` then shows no changes.
@@ -410,6 +417,7 @@ skima serve --port 8080 --baseline origin/main
 | `POST /api/v1/state/tables/{table}/columns`, `PATCH`/`DELETE .../columns/{column}` | Add, change or rename (`{"name": ...}`), drop a column |
 | `PUT`/`DELETE .../primary-key`, `.../{foreign-keys,indexes,constraints,triggers}/{name}` | Set or drop the primary key and the table's other objects |
 | `GET /api/v1/changes`, `GET`/`DELETE /api/v1/changes/hints[/{id}]` | The changes since the baseline with their deltas and SQL; the recorded hints |
+| `POST /api/v1/changes/verify` | Prove the generated changeset against the database, as `skima changeset diff --verify` does |
 | `POST /api/v1/changesets` | Write the next changeset (`{"description": ...}`) |
 | `GET /api/v1/manifest`, `GET /api/v1/validation` | A summary of the manifest; validation results |
 

@@ -9,7 +9,10 @@ import (
 	"skima/pkg/editor"
 	"skima/pkg/manifest"
 	"skima/pkg/util"
+	"skima/pkg/verify"
 	"strings"
+
+	"github.com/spf13/viper"
 )
 
 //go:embed openapi.json
@@ -37,6 +40,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/v1/changes", s.getChanges)
 	m.HandleFunc("GET /api/v1/changes/hints", s.getHints)
 	m.HandleFunc("DELETE /api/v1/changes/hints/{id}", s.deleteHint)
+	m.HandleFunc("POST /api/v1/changes/verify", s.verifyChanges)
 	m.HandleFunc("POST /api/v1/changesets", s.buildChangeset)
 
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -472,10 +476,35 @@ func (s *Server) getChanges(w http.ResponseWriter, r *http.Request) {
 		Sql      []string `json:"sql"`
 		SqlError string   `json:"sqlError,omitempty"`
 	}{Result: result}
-	if response.Sql, err = changes.PreviewSql(result.Deltas); err != nil {
+	if response.Sql, err = changes.PreviewSql(s.workdir, result.Deltas); err != nil {
 		response.SqlError = err.Error()
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+// verifyChanges proves the generated changeset against the database - see verify.Run. It needs the database settings
+// and the CREATE privilege; a changeset that doesn't verify is still a 200, with verified false
+func (s *Server) verifyChanges(w http.ResponseWriter, r *http.Request) {
+	if viper.GetString("dbconn.connstring") == "" {
+		// checked here: connecting with no database configured exits the process
+		writeError(w, http.StatusServiceUnavailable, "verify_unavailable", "no database is configured to verify against - set dbconn in the config file or SKM_DBCONN_* and restart skima serve", nil)
+		return
+	}
+	baseline, ok := s.resolveBaseline(w, r)
+	if !ok {
+		return
+	}
+	draft, err := changes.LoadDraft(s.workdir)
+	if err != nil {
+		writeFailure(w, err)
+		return
+	}
+	report, err := verify.Run(s.workdir, baseline, draft)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "verify_unavailable", "unable to verify against the database: "+err.Error(), nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 
 type hint struct {

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/viper"
 )
 
@@ -48,53 +49,158 @@ func ReadSchemas(stateBuild plan.Unit) (actual drift.Schema, expected drift.Sche
 		return actual, expected, fmt.Errorf("unable to read schema %s: %w", schema, err)
 	}
 
-	tx, err := conn.Begin(ctx)
-	if err != nil {
+	if expected, err = shadowBuild(ctx, conn, schema, stateBuild); err != nil {
 		return actual, expected, err
-	}
-	defer tx.Rollback(ctx) // always - the shadow build is only read
-	// lock_timeout guards against a pre sql file waiting on a lock held by the application
-	_, err = tx.Exec(ctx, "select set_config('search_path', $1, true), set_config('lock_timeout', '10s', true)", "pg_temp, "+pgx.Identifier{schema}.Sanitize())
-	if err != nil {
-		return actual, expected, err
-	}
-	var failures strings.Builder
-	shadow := executor{ex: savepointExecer{tx: tx, optOut: "it cannot be compared"}, record: noRecord, history: &ApplyHistory{}, out: io.Discard, errOut: &failures,
-		shadow: true}
-	if shadow.run(stateBuild.Steps) > 0 {
-		// nothing is recorded, so the statement ids in the messages mean nothing
-		messages := strings.ReplaceAll(failures.String(), " - Statement ID: 0", "")
-		return actual, expected, fmt.Errorf("unable to build the schema the state files describe:\n%s", strings.TrimSpace(messages))
-	}
-	// a view that selects from a view or materialized view the build creates after it is bound to the real one when it
-	// is created - the real schema is on the search path too, so it does not fail and wait for a retry. Now that every
-	// temporary object exists, create the views again so they select from the build's objects
-	for _, step := range stateBuild.Steps {
-		var view string
-		switch step.Kind {
-		case plan.KindView:
-			view = step.Sql[0]
-		case plan.KindMatview:
-			view = step.Shadow[0] // the scratch view with the materialized view's query
-		default:
-			continue
-		}
-		if _, err = tx.Exec(ctx, view); err != nil {
-			return actual, expected, fmt.Errorf("unable to build the schema the state files describe: recreating view %s: %w", step.Describe, err)
-		}
-	}
-	if err = tx.QueryRow(ctx, "select pg_my_temp_schema()").Scan(&namespace); err != nil {
-		return actual, expected, err
-	}
-	if expected, err = readSchema(ctx, tx, namespace, "pg_temp"); err != nil {
-		return actual, expected, fmt.Errorf("unable to read the schema the state files describe: %w", err)
-	}
-	for _, step := range stateBuild.Steps {
-		if step.Kind == plan.KindMatview {
-			standInMatview(expected, step.Describe)
-		}
 	}
 	return actual, expected, nil
+}
+
+// ShadowBuildError is returned when a unit's statements fail in a shadow build
+type ShadowBuildError struct {
+	// Unit says what was being built: the state files, or a changeset
+	Unit string
+	// Changeset is true when the statements that failed were a changeset's
+	Changeset bool
+	Messages  string
+}
+
+func (e *ShadowBuildError) Error() string {
+	return fmt.Sprintf("unable to build %s:\n%s", e.Unit, e.Messages)
+}
+
+// shadowBuild runs the units' steps one after another in the session's temporary schema, in a transaction that is
+// always rolled back, and reads the schema they built. With pg_temp first on the search path, the enums, sequences,
+// tables, indexes, constraints, triggers and views the steps create are temporary objects, and the steps that change
+// objects - e.g. a changeset's alter table - change the temporary ones. It only needs the TEMP privilege
+func shadowBuild(ctx context.Context, conn *pgxpool.Conn, schema string, units ...plan.Unit) (drift.Schema, error) {
+	var built drift.Schema
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return built, err
+	}
+	defer tx.Rollback(ctx) // always - the shadow build is only read
+	// lock_timeout guards against a sql file or script waiting on a lock held by the application
+	_, err = tx.Exec(ctx, "select set_config('search_path', $1, true), set_config('lock_timeout', '10s', true)", "pg_temp, "+pgx.Identifier{schema}.Sanitize())
+	if err != nil {
+		return built, err
+	}
+	for _, unit := range units {
+		var failures strings.Builder
+		shadow := executor{ex: savepointExecer{tx: tx, optOut: "it cannot be compared"}, record: noRecord, history: &ApplyHistory{}, out: io.Discard, errOut: &failures,
+			shadow: true}
+		if shadow.run(unit.Steps) > 0 {
+			// nothing is recorded, so the statement ids in the messages mean nothing
+			messages := strings.ReplaceAll(failures.String(), " - Statement ID: 0", "")
+			what := "the schema the state files describe"
+			if unit.Kind == plan.UnitChangeset {
+				what = "changeset " + unit.Version
+			}
+			return built, &ShadowBuildError{Unit: what, Changeset: unit.Kind == plan.UnitChangeset, Messages: strings.TrimSpace(messages)}
+		}
+		if unit.Kind != plan.UnitState {
+			continue
+		}
+		// a view that selects from a view or materialized view the build creates after it is bound to the real one when
+		// it is created - the real schema is on the search path too, so it does not fail and wait for a retry. Now that
+		// every temporary object exists, create the views again so they select from the build's objects
+		for _, step := range unit.Steps {
+			var view string
+			switch step.Kind {
+			case plan.KindView:
+				view = step.Sql[0]
+			case plan.KindMatview:
+				view = step.Shadow[0] // the scratch view with the materialized view's query
+			default:
+				continue
+			}
+			if _, err = tx.Exec(ctx, view); err != nil {
+				return built, fmt.Errorf("unable to build the schema the state files describe: recreating view %s: %w", step.Describe, err)
+			}
+		}
+	}
+	var namespace uint32
+	if err = tx.QueryRow(ctx, "select pg_my_temp_schema()").Scan(&namespace); err != nil {
+		return built, err
+	}
+	if built, err = readSchema(ctx, tx, namespace, "pg_temp"); err != nil {
+		return built, fmt.Errorf("unable to read the shadow build: %w", err)
+	}
+	for _, unit := range units {
+		for _, step := range unit.Steps {
+			if step.Kind == plan.KindMatview {
+				standInMatview(built, step.Describe)
+			}
+		}
+	}
+	return built, nil
+}
+
+// VerifyChangeset builds the baseline state and applies the changeset on top, builds the current state, and returns
+// both schemas - if the changeset is right, they are the same. Each is built in a scratch schema created inside a
+// transaction that is always rolled back (see scratchBuild): nothing is changed and no apply lock is taken, but the
+// user needs the CREATE privilege on the database
+func VerifyChangeset(baselineBuild plan.Unit, changeset plan.Unit, currentBuild plan.Unit) (afterChangeset drift.Schema, expected drift.Schema, err error) {
+	conn := acquireConn()
+	if conn == nil {
+		return afterChangeset, expected, errors.New("unable to connect to the database")
+	}
+	defer conn.Release()
+	ctx := context.Background()
+	if afterChangeset, err = scratchBuild(ctx, conn, baselineBuild, changeset); err != nil {
+		return afterChangeset, expected, err
+	}
+	expected, err = scratchBuild(ctx, conn, currentBuild)
+	return afterChangeset, expected, err
+}
+
+// scratchSchema is the schema verify builds in - inside a transaction that is always rolled back, so it never exists
+// outside it. The same name for every build keeps their definitions comparable
+const scratchSchema = "skima_verify_scratch"
+
+// scratchBuild runs the units' steps one after another, as apply does, in a scratch schema created inside a
+// transaction that is always rolled back, and reads the schema they built. Unlike a shadow build (skima drift), it
+// doesn't depend on the deployed schema: with only the scratch schema on the search path, the state build's functions,
+// views and materialized views are real objects, so it works on an empty database too
+func scratchBuild(ctx context.Context, conn *pgxpool.Conn, units ...plan.Unit) (drift.Schema, error) {
+	var built drift.Schema
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return built, err
+	}
+	defer tx.Rollback(ctx) // always - the scratch schema is only read
+	if _, err = tx.Exec(ctx, "create schema "+pgx.Identifier{scratchSchema}.Sanitize()); err != nil {
+		if pgErr := asPgError(err); pgErr != nil && pgErr.Code == "42501" { // insufficient_privilege
+			return built, fmt.Errorf("verifying needs the CREATE privilege on the database, to build in a scratch schema that is rolled back: %w", err)
+		}
+		return built, err
+	}
+	// lock_timeout guards against a sql file or script waiting on a lock held by the application
+	_, err = tx.Exec(ctx, "select set_config('search_path', $1, true), set_config('lock_timeout', '10s', true)", pgx.Identifier{scratchSchema}.Sanitize())
+	if err != nil {
+		return built, err
+	}
+	for _, unit := range units {
+		var failures strings.Builder
+		build := executor{ex: savepointExecer{tx: tx, optOut: "it cannot be verified"}, record: noRecord, history: &ApplyHistory{}, out: io.Discard, errOut: &failures}
+		if build.run(unit.Steps) > 0 {
+			// nothing is recorded, so the statement ids in the messages mean nothing
+			messages := strings.ReplaceAll(failures.String(), " - Statement ID: 0", "")
+			what := "the schema the state files describe"
+			if unit.Kind == plan.UnitChangeset {
+				what = "changeset " + unit.Version
+			}
+			return built, &ShadowBuildError{Unit: what, Changeset: unit.Kind == plan.UnitChangeset, Messages: strings.TrimSpace(messages)}
+		}
+	}
+	var namespace uint32
+	var prefix string
+	if err = tx.QueryRow(ctx, "select oid, quote_ident(nspname) from pg_namespace where nspname = $1", scratchSchema).Scan(&namespace, &prefix); err != nil {
+		return built, err
+	}
+	if built, err = readSchema(ctx, tx, namespace, prefix); err != nil {
+		return built, fmt.Errorf("unable to read the scratch build: %w", err)
+	}
+	return built, nil
 }
 
 // standInMatview turns the objects that stood in for a materialized view in the shadow build back into the

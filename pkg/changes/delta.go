@@ -53,16 +53,17 @@ type Delta struct {
 // The order deltas run in, so what depends on something goes before it is dropped and after it is added, and the
 // destructive steps come last
 const (
-	phaseDropDependents = 10 // foreign key, constraint, index, trigger and primary key drops
-	phaseRenameColumns  = 20
-	phaseAddTables      = 30
-	phaseAddColumns     = 40 // with their backfills
-	phaseAlterColumns   = 50
-	phaseAddDependents  = 60 // primary key, constraint, index and trigger adds
-	phaseAddForeignKeys = 65
-	phaseComments       = 70
-	phaseDropColumns    = 80
-	phaseDropTables     = 90
+	phaseDropForeignKeys = 5  // first: a foreign key depends on the primary key or unique constraint it references
+	phaseDropDependents  = 10 // constraint, index, trigger and primary key drops
+	phaseRenameColumns   = 20
+	phaseAddTables       = 30
+	phaseAddColumns      = 40 // with their backfills
+	phaseAlterColumns    = 50
+	phaseAddDependents   = 60 // primary key, constraint, index and trigger adds
+	phaseAddForeignKeys  = 65
+	phaseComments        = 70
+	phaseDropColumns     = 80
+	phaseDropTables      = 90
 )
 
 // Changeset is a changeset file's content

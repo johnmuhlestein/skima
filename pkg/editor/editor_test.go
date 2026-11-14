@@ -360,10 +360,14 @@ func TestPrimaryKeyAndAlterColumn(t *testing.T) {
 	if label.Datatype != "bigint" || !label.Nullable || label.Comment != "the key" {
 		t.Errorf("EXPECTED the column altered  ACTUAL: %+v", label)
 	}
-	if _, err = e.SetPrimaryKey("tags", etag(t, e, "tags"), []string{"id"}); err != nil {
+	// tags.id is an identity primary key column - the state build would ignore a primary-key
+	if _, err = e.SetPrimaryKey("tags", etag(t, e, "tags"), []string{"id"}); !errors.Is(err, ErrExists) {
+		t.Errorf("identity primary key - EXPECTED ErrExists  ACTUAL: %v", err)
+	}
+	if _, err = e.SetPrimaryKey("documents", etag(t, e, "documents"), []string{"id", "project_id"}); err != nil {
 		t.Fatal(err)
 	}
-	if pk := mustTable(t, e, "tags").PrimaryKey; !reflect.DeepEqual(pk, []string{"id"}) {
+	if pk := mustTable(t, e, "documents").PrimaryKey; !reflect.DeepEqual(pk, []string{"id", "project_id"}) {
 		t.Errorf("EXPECTED the primary key set  ACTUAL: %v", pk)
 	}
 	if _, err = e.AlterColumn("tags", etag(t, e, "tags"), "nope", ColumnChanges{Comment: &comment}); !errors.Is(err, ErrNotFound) {
