@@ -277,21 +277,27 @@ func markRolledBack(ctx context.Context, history *ApplyHistory) error {
 // LockApply takes a postgres advisory lock for the schema so that only one apply runs against it at a time - two
 // deploy jobs would otherwise apply the same changesets concurrently. If another apply holds the lock, this waits up to
 // timeout for it to finish (0 waits indefinitely) and returns an error if it does not, or if ctx is cancelled. The lock
-// is held on a dedicated connection until the process exits.
-func LockApply(ctx context.Context, timeout time.Duration, out io.Writer) error {
+// is held on a dedicated connection until unlock is called - or the process exits, which closes the connection.
+func LockApply(ctx context.Context, timeout time.Duration, out io.Writer) (unlock func(), err error) {
 	conn, err := acquireConn(ctx)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	unlock = func() {
+		done, cancel := cleanup(ctx)
+		defer cancel()
+		_, _ = conn.Exec(done, "select pg_advisory_unlock(hashtext($1))", "skima apply "+viper.GetString("dbconn.schema"))
+		conn.Release()
 	}
 	schema := viper.GetString("dbconn.schema")
 	key := "skima apply " + schema
 	var locked bool
 	if err = conn.QueryRow(ctx, "select pg_try_advisory_lock(hashtext($1))", key).Scan(&locked); err != nil {
 		conn.Release()
-		return fmt.Errorf("unable to take the apply lock: %w", err)
+		return nil, fmt.Errorf("unable to take the apply lock: %w", err)
 	}
 	if locked {
-		return nil // the connection is intentionally never released - closing it at exit releases the lock
+		return unlock, nil
 	}
 
 	wait := "until it finishes"
@@ -306,23 +312,25 @@ func LockApply(ctx context.Context, timeout time.Duration, out io.Writer) error 
 	}
 	if _, err = conn.Exec(ctx, "select set_config('lock_timeout', $1, false)", strconv.FormatInt(timeoutMs, 10)); err != nil {
 		conn.Release()
-		return fmt.Errorf("unable to set the apply lock timeout: %w", err)
+		return nil, fmt.Errorf("unable to set the apply lock timeout: %w", err)
 	}
 	_, err = conn.Exec(ctx, "select pg_advisory_lock(hashtext($1))", key)
 	switch pgErr := asPgError(err); {
 	case pgErr != nil && pgErr.Code == "55P03": // lock_not_available
 		holder := lockHolder(context.WithoutCancel(ctx), conn, key)
 		conn.Release()
-		return fmt.Errorf("timed out after %s waiting for the apply lock on schema %s%s - nothing was applied. Rerun once that apply finishes, or set a longer --lock-timeout", timeout, schema, holder)
+		return nil, fmt.Errorf("timed out after %s waiting for the apply lock on schema %s%s - nothing was applied. Rerun once that apply finishes, or set a longer --lock-timeout", timeout, schema, holder)
 	case ctx.Err() != nil:
 		conn.Release()
-		return fmt.Errorf("interrupted while waiting for the apply lock - nothing was applied: %w", ctx.Err())
+		return nil, fmt.Errorf("interrupted while waiting for the apply lock - nothing was applied: %w", ctx.Err())
 	case err != nil:
 		conn.Release()
-		return fmt.Errorf("unable to take the apply lock: %w", err)
+		return nil, fmt.Errorf("unable to take the apply lock: %w", err)
 	}
 	fmt.Fprintln(out, "Apply lock acquired")
-	return nil // the connection is intentionally never released - closing it at exit releases the lock
+	// lock_timeout was set for the wait - the connection goes back to the pool once unlocked
+	_, _ = conn.Exec(ctx, "select set_config('lock_timeout', '0', false)")
+	return unlock, nil
 }
 
 // lockHolder describes the session holding the apply lock, to help find a stuck apply. A bigint advisory lock key is

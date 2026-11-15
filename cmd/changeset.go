@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"io"
 	"path/filepath"
 	"strings"
 
@@ -15,15 +15,12 @@ import (
 	"github.com/spf13/viper"
 )
 
-var baselineRef string
-var diffCheck bool
-var diffVerify bool
-
-// changesetCmd groups the commands that generate changesets from the state files
-var changesetCmd = &cobra.Command{
-	Use:   "changeset",
-	Short: "Generates changesets from changes to the state files.",
-	Long: `Works out how the state files changed since a baseline - the state at a git commit - and generates the changeset
+// newChangesetCmd groups the commands that generate changesets from the state files
+func newChangesetCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "changeset",
+		Short: "Generates changesets from changes to the state files.",
+		Long: `Works out how the state files changed since a baseline - the state at a git commit - and generates the changeset
 deltas that make those changes, so a schema change is made once, in the state files.
 
 The baseline is by default the last commit that changed the deltas directory: the state the latest changeset brought
@@ -33,13 +30,26 @@ git repository.
 A diff can't tell a renamed column from a dropped and an added one, or how to fill a new NOT NULL column on a table
 that has rows. That intent is kept as hints in .skima/draft.json, which skima git-ignores. For any other intent, edit the
 file skima changeset build writes and prove the edit with skima changeset verify.`,
+	}
+	cmd.PersistentFlags().String("baseline", "", "The git ref to compare with - by default the last commit that changed the deltas directory")
+	return cmd
 }
 
-// changesetDiffCmd represents the changeset diff command
-var changesetDiffCmd = &cobra.Command{
-	Use:   "diff",
-	Short: "Shows how the state changed since the baseline, and the changeset that makes the changes.",
-	Long: `Shows how the state files changed since the baseline and the changeset deltas generated for those changes,
+// resolveBaseline resolves the changeset commands' --baseline, by default the last commit that changed deltas/
+func resolveBaseline(cmd *cobra.Command) (changes.Baseline, error) {
+	ref, err := cmd.Flags().GetString("baseline")
+	if err != nil {
+		return changes.Baseline{}, err
+	}
+	return changes.ResolveBaseline(viper.GetString("workdir"), ref)
+}
+
+func newChangesetDiffCmd(root *rootOptions) *cobra.Command {
+	var check, verifyChanges bool
+	cmd := &cobra.Command{
+		Use:   "diff",
+		Short: "Shows how the state changed since the baseline, and the changeset that makes the changes.",
+		Long: `Shows how the state files changed since the baseline and the changeset deltas generated for those changes,
 with warnings for anything risky (dropping data, changing a datatype, NOT NULL on a table with rows) and the SQL the
 changeset would run. Nothing is written.
 
@@ -61,63 +71,65 @@ Example:
   skima changeset diff --output=json
   skima changeset diff --check
   skima changeset diff --verify`,
-	Run: func(cmd *cobra.Command, args []string) {
-		workdir := viper.GetString("workdir")
-		baseline, err := changes.ResolveBaseline(workdir, baselineRef)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "ERROR:", err)
-			os.Exit(1)
-		}
-		draft, err := changes.LoadDraft(workdir)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "ERROR: unable to read", changes.DraftPath(workdir)+":", err)
-			os.Exit(1)
-		}
-		result, err := changes.Diff(workdir, baseline, draft)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "ERROR:", err)
-			os.Exit(1)
-		}
-		statements, planErr := changes.PreviewSql(workdir, result.Deltas)
-		var verified *verify.Report
-		if diffVerify && len(result.Deltas) > 0 {
-			report, err := verify.Deltas(cmd.Context(), workdir, baseline, result.Deltas)
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			workdir := viper.GetString("workdir")
+			baseline, err := resolveBaseline(cmd)
 			if err != nil {
-				fmt.Fprintln(os.Stderr, "ERROR: unable to verify the changeset:", err)
-				os.Exit(1)
+				return err
 			}
-			report.Unsupported = result.Unsupported
-			verified = &report
-		}
-		if output == "json" {
-			report := struct {
-				changes.Result
-				Sql    []string       `json:"sql"`
-				Verify *verify.Report `json:"verify,omitempty"`
-			}{result, statements, verified}
-			jsonOutput, err := json.MarshalIndent(report, "", "  ")
+			draft, err := changes.LoadDraft(workdir)
 			if err != nil {
-				fmt.Fprintln(os.Stderr, "Unable to marshal the diff into JSON", err)
-				os.Exit(1)
+				return fmt.Errorf("unable to read %s: %w", changes.DraftPath(workdir), err)
 			}
-			fmt.Println(string(jsonOutput))
-		} else if !diffCheck || result.HasChanges() {
-			printDiff(result, statements, planErr)
-			if verified != nil {
-				printVerify(*verified)
+			result, err := changes.Diff(workdir, baseline, draft)
+			if err != nil {
+				return err
 			}
-		}
-		if (diffCheck && result.HasChanges()) || (verified != nil && !verified.Verified) {
-			os.Exit(1)
-		}
-	},
+			statements, planErr := changes.PreviewSql(workdir, result.Deltas)
+			var verified *verify.Report
+			if verifyChanges && len(result.Deltas) > 0 {
+				report, err := verify.Deltas(cmd.Context(), workdir, baseline, result.Deltas)
+				if err != nil {
+					return fmt.Errorf("unable to verify the changeset: %w", err)
+				}
+				report.Unsupported = result.Unsupported
+				verified = &report
+			}
+			out := cmd.OutOrStdout()
+			if root.json() {
+				report := struct {
+					changes.Result
+					Sql    []string       `json:"sql"`
+					Verify *verify.Report `json:"verify,omitempty"`
+				}{result, statements, verified}
+				jsonOutput, err := json.MarshalIndent(report, "", "  ")
+				if err != nil {
+					return fmt.Errorf("unable to marshal the diff into JSON: %w", err)
+				}
+				fmt.Fprintln(out, string(jsonOutput))
+			} else if !check || result.HasChanges() {
+				printDiff(out, result, statements, planErr)
+				if verified != nil {
+					printVerify(out, *verified)
+				}
+			}
+			if (check && result.HasChanges()) || (verified != nil && !verified.Verified) {
+				return exitCode(1)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&verifyChanges, "verify", false, "Prove the changeset against the database: the baseline's state with the changeset applied must equal the current state - the exit code is 1 when it doesn't")
+	cmd.Flags().BoolVar(&check, "check", false, "Show nothing unless the state changed since the baseline - the exit code is 1 when it did")
+	return cmd
 }
 
-// changesetVerifyCmd represents the changeset verify command
-var changesetVerifyCmd = &cobra.Command{
-	Use:   "verify [changeset]",
-	Short: "Proves a changeset not committed yet against the database - e.g. one edited by hand after changeset build.",
-	Long: `Proves a changeset file against the database configured for skima, as changeset diff --verify proves the
+func newChangesetVerifyCmd(root *rootOptions) *cobra.Command {
+	return &cobra.Command{
+		Use:   "verify [changeset]",
+		Short: "Proves a changeset not committed yet against the database - e.g. one edited by hand after changeset build.",
+		Long: `Proves a changeset file against the database configured for skima, as changeset diff --verify proves the
 generated one: the baseline's state files are built and the changeset applied on top, and the result must be exactly
 what the current state files build. The exit code is 1 when it doesn't verify.
 
@@ -138,140 +150,126 @@ Example:
   skima changeset verify
   skima changeset verify v1_0_4.json
   skima changeset verify --output=json`,
-	Args: cobra.MaximumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		workdir := viper.GetString("workdir")
-		name := ""
-		if len(args) == 1 {
-			name = args[0]
-		}
-		path, err := changes.PendingChangeset(workdir, name)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "ERROR:", err)
-			os.Exit(1)
-		}
-		baseline, err := changes.ResolveBaseline(workdir, baselineRef)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "ERROR:", err)
-			os.Exit(1)
-		}
-		report, err := verify.File(cmd.Context(), workdir, baseline, path)
-		var invalid *changes.InvalidChangesetError
-		switch {
-		case errors.As(err, &invalid):
-			fmt.Fprintf(os.Stderr, "ERROR: %s is invalid - fix it before verifying:\n", filepath.Base(path))
-			for _, issue := range invalid.Issues {
-				fmt.Fprintln(os.Stderr, "  "+issue)
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			workdir := viper.GetString("workdir")
+			name := ""
+			if len(args) == 1 {
+				name = args[0]
 			}
-			os.Exit(1)
-		case err != nil:
-			fmt.Fprintln(os.Stderr, "ERROR: unable to verify the changeset:", err)
-			os.Exit(1)
-		}
-		if output == "json" {
-			jsonOutput, err := json.MarshalIndent(report, "", "  ")
+			path, err := changes.PendingChangeset(workdir, name)
 			if err != nil {
-				fmt.Fprintln(os.Stderr, "Unable to marshal the verification into JSON", err)
-				os.Exit(1)
+				return err
 			}
-			fmt.Println(string(jsonOutput))
-		} else {
-			from := "the last commit that changed deltas/"
-			if baseline.Ref != "" {
-				from = baseline.Ref
+			baseline, err := resolveBaseline(cmd)
+			if err != nil {
+				return err
 			}
-			fmt.Printf("Baseline: %.7s %q (%s)\n", baseline.Commit, baseline.Subject, from)
-			fmt.Printf("Changeset: %s (%d deltas)\n", report.File, report.Deltas)
-			printVerify(report)
-		}
-		if !report.Verified {
-			os.Exit(1)
-		}
-	},
+			report, err := verify.File(cmd.Context(), workdir, baseline, path)
+			var invalid *changes.InvalidChangesetError
+			switch {
+			case errors.As(err, &invalid):
+				return fmt.Errorf("%s is invalid - fix it before verifying:\n  %s", filepath.Base(path), strings.Join(invalid.Issues, "\n  "))
+			case err != nil:
+				return fmt.Errorf("unable to verify the changeset: %w", err)
+			}
+			out := cmd.OutOrStdout()
+			if root.json() {
+				jsonOutput, err := json.MarshalIndent(report, "", "  ")
+				if err != nil {
+					return fmt.Errorf("unable to marshal the verification into JSON: %w", err)
+				}
+				fmt.Fprintln(out, string(jsonOutput))
+			} else {
+				from := "the last commit that changed deltas/"
+				if baseline.Ref != "" {
+					from = baseline.Ref
+				}
+				fmt.Fprintf(out, "Baseline: %.7s %q (%s)\n", baseline.Commit, baseline.Subject, from)
+				fmt.Fprintf(out, "Changeset: %s (%d deltas)\n", report.File, report.Deltas)
+				printVerify(out, report)
+			}
+			if !report.Verified {
+				return exitCode(1)
+			}
+			return nil
+		},
+	}
 }
 
-func init() {
-	rootCmd.AddCommand(changesetCmd)
-	changesetCmd.AddCommand(changesetVerifyCmd)
-	changesetCmd.PersistentFlags().StringVar(&baselineRef, "baseline", "", "The git ref to compare with - by default the last commit that changed the deltas directory")
-	changesetCmd.AddCommand(changesetDiffCmd)
-	changesetDiffCmd.Flags().BoolVar(&diffVerify, "verify", false, "Prove the changeset against the database: the baseline's state with the changeset applied must equal the current state - the exit code is 1 when it doesn't")
-	changesetDiffCmd.Flags().BoolVar(&diffCheck, "check", false, "Show nothing unless the state changed since the baseline - the exit code is 1 when it did")
-}
-
-func printDiff(result changes.Result, statements []string, planErr error) {
+func printDiff(out io.Writer, result changes.Result, statements []string, planErr error) {
 	from := "the last commit that changed deltas/"
 	if result.Baseline.Ref != "" {
 		from = result.Baseline.Ref
 	}
-	fmt.Printf("Baseline: %.7s %q (%s)\n", result.Baseline.Commit, result.Baseline.Subject, from)
+	fmt.Fprintf(out, "Baseline: %.7s %q (%s)\n", result.Baseline.Commit, result.Baseline.Subject, from)
 	if len(result.PendingChangesets) > 0 {
-		fmt.Printf("Not committed yet: %s - the baseline moves when a changeset is committed, so commit it with the state changes it covers\n",
+		fmt.Fprintf(out, "Not committed yet: %s - the baseline moves when a changeset is committed, so commit it with the state changes it covers\n",
 			strings.Join(result.PendingChangesets, ", "))
 	}
 	if !result.HasChanges() {
-		fmt.Println("\nThe state files have not changed since the baseline")
+		fmt.Fprintln(out, "\nThe state files have not changed since the baseline")
 		return
 	}
 	if len(result.Changes) > 0 {
-		fmt.Println("\nChanges:")
+		fmt.Fprintln(out, "\nChanges:")
 		for _, c := range result.Changes {
-			fmt.Printf("  %-8s %s\n", c.Action, describeChange(c))
+			fmt.Fprintf(out, "  %-8s %s\n", c.Action, describeChange(c))
 		}
 	}
 	if len(result.Unsupported) > 0 {
-		fmt.Println("\nUnsupported - write these deltas by hand:")
+		fmt.Fprintln(out, "\nUnsupported - write these deltas by hand:")
 		for _, c := range result.Unsupported {
-			fmt.Printf("  %-8s %s\n", c.Action, describeChange(c))
+			fmt.Fprintf(out, "  %-8s %s\n", c.Action, describeChange(c))
 		}
 	}
 	if len(result.Warnings) > 0 {
-		fmt.Println("\nWarnings:")
+		fmt.Fprintln(out, "\nWarnings:")
 		for _, w := range result.Warnings {
-			fmt.Printf("  - %s\n", w)
+			fmt.Fprintf(out, "  - %s\n", w)
 		}
 	}
 	if len(result.Deltas) > 0 {
 		content, err := changes.Changeset{Deltas: result.Deltas}.Format()
 		if err == nil {
-			fmt.Printf("\nChangeset (%d deltas):\n%s", len(result.Deltas), content)
+			fmt.Fprintf(out, "\nChangeset (%d deltas):\n%s", len(result.Deltas), content)
 		}
-		fmt.Println("\nSQL:")
+		fmt.Fprintln(out, "\nSQL:")
 		if planErr != nil {
-			fmt.Printf("  unable to plan the changeset: %s\n", planErr)
+			fmt.Fprintf(out, "  unable to plan the changeset: %s\n", planErr)
 		}
 		for _, s := range statements {
-			fmt.Printf("  %s;\n", strings.TrimSuffix(strings.TrimSpace(s), ";"))
+			fmt.Fprintf(out, "  %s;\n", strings.TrimSuffix(strings.TrimSpace(s), ";"))
 		}
 	}
 }
 
 // printVerify shows whether the changeset brings the baseline to the current state - differences as skima drift shows
 // them, with "expected" from the current state files and "actual" from the baseline with the changeset applied
-func printVerify(report verify.Report) {
-	fmt.Println("\nVerify:")
+func printVerify(out io.Writer, report verify.Report) {
+	fmt.Fprintln(out, "\nVerify:")
 	switch {
 	case report.ApplyError != "":
-		fmt.Println("  NOT VERIFIED - the changeset failed to apply to the baseline:")
+		fmt.Fprintln(out, "  NOT VERIFIED - the changeset failed to apply to the baseline:")
 		for _, line := range strings.Split(report.ApplyError, "\n") {
-			fmt.Println("    " + line)
+			fmt.Fprintln(out, "    "+line)
 		}
 	case report.Verified:
-		fmt.Println("  verified - the baseline with the changeset applied is exactly the current state")
+		fmt.Fprintln(out, "  verified - the baseline with the changeset applied is exactly the current state")
 	default:
 		differences := fmt.Sprintf("%d differences", len(report.Findings))
 		if len(report.Findings) == 1 {
 			differences = "1 difference"
 		}
-		fmt.Printf("  NOT VERIFIED - %s between the current state (expected) and the baseline with the changeset applied (actual):\n", differences)
-		var out strings.Builder
-		drift.Render(&out, drift.Report{Findings: report.Findings})
-		lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+		fmt.Fprintf(out, "  NOT VERIFIED - %s between the current state (expected) and the baseline with the changeset applied (actual):\n", differences)
+		var rendered strings.Builder
+		drift.Render(&rendered, drift.Report{Findings: report.Findings})
+		lines := strings.Split(strings.TrimRight(rendered.String(), "\n"), "\n")
 		for _, line := range lines[1:] { // the first line is drift's summary
-			fmt.Println("  " + line)
+			fmt.Fprintln(out, "  "+line)
 		}
 		if len(report.Unsupported) > 0 {
-			fmt.Println("  Unsupported changes generate no deltas, so they show up here until their deltas are written by hand")
+			fmt.Fprintln(out, "  Unsupported changes generate no deltas, so they show up here until their deltas are written by hand")
 		}
 	}
 }

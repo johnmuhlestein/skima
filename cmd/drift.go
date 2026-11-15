@@ -2,8 +2,8 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/jackc/pgx/v5"
@@ -15,13 +15,13 @@ import (
 	"github.com/spf13/viper"
 )
 
-var driftIgnore []string
-
-// driftCmd represents the drift command
-var driftCmd = &cobra.Command{
-	Use:   "drift",
-	Short: "Reports where the database schema differs from its state files.",
-	Long: `Compares the schema in the database with the schema its state files describe, and reports every difference:
+func newDriftCmd(root *rootOptions) *cobra.Command {
+	var ignore []string
+	var detailedExitcode, skipValidation bool
+	cmd := &cobra.Command{
+		Use:   "drift",
+		Short: "Reports where the database schema differs from its state files.",
+		Long: `Compares the schema in the database with the schema its state files describe, and reports every difference:
   missing  the state files define it, the database does not have it
   extra    the database has it, the state files do not define it
   changed  both have it, with different definitions - shown as expected and actual
@@ -58,59 +58,60 @@ Example:
   skima drift
   skima drift --detailed-exitcode
   skima drift --ignore 'legacy_*' --output=json`,
-	Args: cobra.NoArgs,
-	Run: func(cmd *cobra.Command, args []string) {
-		report := drift.Report{Schema: viper.GetString("dbconn.schema")}
-		hist, err := db.GetApplyHistory(cmd.Context())
-		switch err {
-		case nil:
-			report.Deployed = hist.SchemaVersion.String()
-			for _, path := range pendingChangesets(hist.SchemaVersion) {
-				report.Pending = append(report.Pending, util.ExtractVersion(filepath.Base(path)).String())
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			report := drift.Report{Schema: viper.GetString("dbconn.schema")}
+			hist, err := db.GetApplyHistory(ctx)
+			switch {
+			case err == nil:
+				report.Deployed = hist.SchemaVersion.String()
+				pending, err := pendingChangesets(hist.SchemaVersion)
+				if err != nil {
+					return err
+				}
+				for _, path := range pending {
+					report.Pending = append(report.Pending, util.ExtractVersion(filepath.Base(path)).String())
+				}
+			case errors.Is(err, db.ErrNoHistTable), errors.Is(err, pgx.ErrNoRows):
+				// not managed by skima yet, e.g. before a baseline - it can still be compared with the state files
+			default:
+				return fmt.Errorf("unable to retrieve the apply history: %w", err)
 			}
-		case db.ErrNoHistTable, pgx.ErrNoRows:
-			// not managed by skima yet, e.g. before a baseline - it can still be compared with the state files
-		default:
-			fmt.Fprintln(os.Stderr, "Unable to retrieve the apply history:", err)
-			os.Exit(1)
-		}
 
-		validateOrExit(nil, "drift cannot be checked")
-		p, err := plan.ForState(true)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "ERROR: unable to read the state files:", err)
-			os.Exit(1)
-		}
-		actual, expected, err := db.ReadSchemas(cmd.Context(), p.Units[0].WithoutPostSql())
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "ERROR:", err)
-			os.Exit(1)
-		}
-		report.Findings = drift.Compare(expected, actual)
-		if err = report.Ignore(append(viper.GetStringSlice("drift.ignore"), driftIgnore...)); err != nil {
-			fmt.Fprintln(os.Stderr, "ERROR:", err)
-			os.Exit(1)
-		}
-
-		if output == "json" {
-			jsonOutput, err := json.MarshalIndent(report, "", "  ")
+			if err = validateFor(cmd, skipValidation, nil, "drift cannot be checked", false); err != nil {
+				return err
+			}
+			p, err := plan.ForState(true)
 			if err != nil {
-				fmt.Fprintln(os.Stderr, "Unable to marshal the drift report into JSON", err)
-				os.Exit(1)
+				return fmt.Errorf("unable to read the state files: %w", err)
 			}
-			fmt.Println(string(jsonOutput))
-		} else {
-			drift.Render(os.Stdout, report)
-		}
-		if detailedExitcode && report.Drifted() {
-			os.Exit(2)
-		}
-	},
-}
+			actual, expected, err := db.ReadSchemas(ctx, p.Units[0].WithoutPostSql())
+			if err != nil {
+				return err
+			}
+			report.Findings = drift.Compare(expected, actual)
+			if err = report.Ignore(append(viper.GetStringSlice("drift.ignore"), ignore...)); err != nil {
+				return err
+			}
 
-func init() {
-	rootCmd.AddCommand(driftCmd)
-	driftCmd.Flags().StringSliceVar(&driftIgnore, "ignore", nil, "Leave out differences in objects matching this pattern (e.g. 'legacy_*' or 'documents.*_idx') - repeatable, added to drift.ignore in the config")
-	driftCmd.Flags().BoolVar(&detailedExitcode, "detailed-exitcode", false, "Exit with 2 when there is drift (0 when there is none, 1 on an error)")
-	driftCmd.Flags().BoolVar(&skipValidation, "skip-validation", false, "Compare without first validating the state files against the skima JSON schemas")
+			if root.json() {
+				jsonOutput, err := json.MarshalIndent(report, "", "  ")
+				if err != nil {
+					return fmt.Errorf("unable to marshal the drift report into JSON: %w", err)
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), string(jsonOutput))
+			} else {
+				drift.Render(cmd.OutOrStdout(), report)
+			}
+			if detailedExitcode && report.Drifted() {
+				return exitCode(2)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringSliceVar(&ignore, "ignore", nil, "Leave out differences in objects matching this pattern (e.g. 'legacy_*' or 'documents.*_idx') - repeatable, added to drift.ignore in the config")
+	cmd.Flags().BoolVar(&detailedExitcode, "detailed-exitcode", false, "Exit with 2 when there is drift (0 when there is none, 1 on an error)")
+	cmd.Flags().BoolVar(&skipValidation, "skip-validation", false, "Compare without first validating the state files against the skima JSON schemas")
+	return cmd
 }
