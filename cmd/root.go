@@ -1,8 +1,12 @@
+// Package cmd is skima's command line: a cobra command per skima command, built fresh by NewRootCmd so a test can run
+// a command in-process. Commands return errors - Execute prints them and turns them into the exit code
 package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -12,24 +16,97 @@ import (
 	"github.com/spf13/viper"
 )
 
-var cfgFile string
-var output string
-
-// rootCmd represents the base command when called without any subcommands
-var rootCmd = &cobra.Command{
-	Use:   "skima",
-	Short: "Database schema management tool",
-	Long: `Tool for managing schema definition, deployment of both
-from scratch databases and deltas over time in an existing database.`,
-	Version: versionString(),
-}
-
 // exitInterrupted is the exit code after Ctrl+C (128 + SIGINT), as a shell reports it
 const exitInterrupted = 130
 
-// Execute runs the command. Its context is cancelled by the first Ctrl+C (or SIGTERM): an apply stops at the statement
-// it is running, rolls back and records the run as cancelled. A second Ctrl+C exits at once
-func Execute() {
+// exitError ends a command with an exit code other than 1, or with 1 and no further message - e.g. 2 for
+// --detailed-exitcode, or 1 after the problems were already listed
+type exitError struct {
+	code int
+	err  error // printed when set
+}
+
+func (e *exitError) Error() string {
+	if e.err == nil {
+		return fmt.Sprintf("exit code %d", e.code)
+	}
+	return e.err.Error()
+}
+
+func (e *exitError) Unwrap() error { return e.err }
+
+// exitCode ends the command with the code and no message
+func exitCode(code int) error { return &exitError{code: code} }
+
+// rootOptions are the flags every command has
+type rootOptions struct {
+	cfgFile string
+	output  string
+}
+
+// json reports whether the global --output=json was given
+func (o *rootOptions) json() bool { return o.output == "json" }
+
+// NewRootCmd builds the skima command with all its subcommands
+func NewRootCmd() *cobra.Command {
+	opts := &rootOptions{}
+	root := &cobra.Command{
+		Use:   "skima",
+		Short: "Database schema management tool",
+		Long: `Tool for managing schema definition, deployment of both
+from scratch databases and deltas over time in an existing database.`,
+		Version: versionString(),
+		// errors are printed once, by Execute - a usage error also says where to get help
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			return initConfig(cmd, opts)
+		},
+	}
+	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		return fmt.Errorf("%w - see %s --help", err, cmd.CommandPath())
+	})
+
+	flags := root.PersistentFlags()
+	flags.StringVar(&opts.cfgFile, "config", "", "config file (default is $HOME/.skima.yaml)")
+	flags.StringVar(&opts.output, "output", "", "The output format - default is plain, human readable texts. For those commands where it makes sense/is documented, you can also have the output in json format")
+	flags.StringP("workdir", "w", "", "The manifest working directory containing the state and deltas directories - overrides the config file value")
+	flags.String("dbconnstring", "", "The database host - should not include database name, port, schema, username or password - overrides the config file value")
+	flags.Int("dbport", 0, "The database port to connect to - overrides the config file value")
+	flags.String("dbdb", "", "The database name within the instance to connect to - overrides the config file value")
+	flags.String("dbschema", "", "The database schema name to connect to - overrides the config file value")
+	flags.String("dbusername", "", "The username to use to log into the database - overrides the config file value")
+	flags.String("dbpassword", "", "The database user's password - visible to other users in the process list, so prefer SKM_DBCONN_PASSWORD or the config file")
+	flags.String("dbsuperuser", "", "A superuser for apply --bootstrap, which creates the user and schema - set together with --dbsuperuserpwd")
+	flags.String("dbsuperuserpwd", "", "The superuser's password - visible in the process list, so prefer SKM_DBCONN_SUPERUSERPWD or the config file")
+	root.MarkFlagsRequiredTogether("dbsuperuser", "dbsuperuserpwd")
+	for key, flag := range map[string]string{
+		"workdir":             "workdir",
+		"dbconn.connstring":   "dbconnstring",
+		"dbconn.port":         "dbport",
+		"dbconn.database":     "dbdb",
+		"dbconn.schema":       "dbschema",
+		"dbconn.username":     "dbusername",
+		"dbconn.password":     "dbpassword",
+		"dbconn.superuser":    "dbsuperuser",
+		"dbconn.superuserpwd": "dbsuperuserpwd",
+	} {
+		cobra.CheckErr(viper.BindPFlag(key, flags.Lookup(flag)))
+	}
+
+	manifest := newManifestCmd()
+	manifest.AddCommand(newListCmd(), newParseCmd(), newValidateCmd(opts), newFmtCmd())
+	changeset := newChangesetCmd()
+	changeset.AddCommand(newChangesetDiffCmd(opts), newChangesetVerifyCmd(opts), newChangesetBuildCmd(), newChangesetRenameCmd(),
+		newChangesetBackfillCmd(), newChangesetHintsCmd())
+	root.AddCommand(newApplyCmd(opts), newPlanCmd(opts), newDriftCmd(opts), newInspectCmd(opts), newServeCmd(), manifest, changeset)
+	return root
+}
+
+// Execute runs skima with the process's arguments and returns the exit code. The command's context is cancelled by
+// the first Ctrl+C (or SIGTERM): an apply stops at the statement it is running, rolls back and records the run as
+// cancelled. A second Ctrl+C exits at once
+func Execute() int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	signals := make(chan os.Signal, 1)
@@ -43,64 +120,40 @@ func Execute() {
 		case <-ctx.Done():
 		}
 	}()
-	if err := rootCmd.ExecuteContext(ctx); err != nil {
-		os.Exit(1)
-	}
+	return run(ctx, NewRootCmd(), os.Args[1:], os.Stderr)
 }
 
-// exitOnError prints err and exits - with exitInterrupted when it came from Ctrl+C
-func exitOnError(ctx context.Context, err error) {
+// run executes the command with the arguments, printing its error to errOut, and returns the exit code
+func run(ctx context.Context, root *cobra.Command, args []string, errOut io.Writer) int {
+	root.SetArgs(args)
+	err := root.ExecuteContext(ctx)
 	if err == nil {
-		return
+		return 0
 	}
-	fmt.Fprintln(os.Stderr, "ERROR:", err)
+	var exit *exitError
+	if errors.As(err, &exit) {
+		if exit.err != nil {
+			fmt.Fprintln(errOut, "ERROR:", exit.err)
+		}
+		return exit.code
+	}
+	fmt.Fprintln(errOut, "ERROR:", err)
 	if ctx.Err() != nil {
-		os.Exit(exitInterrupted)
+		return exitInterrupted
 	}
-	os.Exit(1)
-}
-
-func init() {
-	cobra.OnInitialize(initConfig)
-
-	// Persistent Flags and bindings
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.skima.yaml)")
-	rootCmd.PersistentFlags().StringVar(&output, "output", "", "The output format - default is plain, human readable texts. For those commands where it makes sense/is documented, you can also have the output in json format")
-	rootCmd.PersistentFlags().StringP("workdir", "w", "", "The manifest working directory containing the state and deltas directories - overrides the config file value")
-	cobra.CheckErr(viper.BindPFlag("workdir", rootCmd.PersistentFlags().Lookup("workdir")))
-	rootCmd.PersistentFlags().String("dbconnstring", "", "The connection string for the database instance - should not include database name, port, schema, username or pwd -  - overrides the config file value")
-	rootCmd.PersistentFlags().Int("dbport", 0, "The database port to connect to - overrides the config file value")
-	rootCmd.PersistentFlags().String("dbdb", "", "The database name within the instance to connect to - overrides the config file value")
-	rootCmd.PersistentFlags().String("dbschema", "", "The database schema name to connect to - overrides the config file value")
-	rootCmd.PersistentFlags().String("dbusername", "", "The username to use to log into the database - overrides the config file value")
-	rootCmd.PersistentFlags().String("dbpassword", "", "The database user's password - visible to other users in the process list, so prefer SKM_DBCONN_PASSWORD or the config file")
-	rootCmd.PersistentFlags().String("dbsuperuser", "", "A superuser for apply --bootstrap, which creates the user and schema - set together with --dbsuperuserpwd")
-	rootCmd.PersistentFlags().String("dbsuperuserpwd", "", "The superuser's password - visible in the process list, so prefer SKM_DBCONN_SUPERUSERPWD or the config file")
-	rootCmd.MarkFlagsRequiredTogether("dbsuperuser", "dbsuperuserpwd")
-	cobra.CheckErr(viper.BindPFlag("dbconn.connstring", rootCmd.PersistentFlags().Lookup("dbconnstring")))
-	cobra.CheckErr(viper.BindPFlag("dbconn.port", rootCmd.PersistentFlags().Lookup("dbport")))
-	cobra.CheckErr(viper.BindPFlag("dbconn.database", rootCmd.PersistentFlags().Lookup("dbdb")))
-	cobra.CheckErr(viper.BindPFlag("dbconn.schema", rootCmd.PersistentFlags().Lookup("dbschema")))
-	cobra.CheckErr(viper.BindPFlag("dbconn.username", rootCmd.PersistentFlags().Lookup("dbusername")))
-	cobra.CheckErr(viper.BindPFlag("dbconn.password", rootCmd.PersistentFlags().Lookup("dbpassword")))
-	cobra.CheckErr(viper.BindPFlag("dbconn.superuser", rootCmd.PersistentFlags().Lookup("dbsuperuser")))
-	cobra.CheckErr(viper.BindPFlag("dbconn.superuserpwd", rootCmd.PersistentFlags().Lookup("dbsuperuserpwd")))
-
-	// Cobra also supports local flags, which will only run
-	// when this action is called directly.
-	// rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	return 1
 }
 
 // initConfig reads in config file and ENV variables if set.
-func initConfig() {
-	if cfgFile != "" {
+func initConfig(cmd *cobra.Command, opts *rootOptions) error {
+	if opts.cfgFile != "" {
 		// Use config file from the flag.
-		viper.SetConfigFile(cfgFile)
+		viper.SetConfigFile(opts.cfgFile)
 	} else {
-		// Find home directory.
 		home, err := os.UserHomeDir()
-		cobra.CheckErr(err)
-
+		if err != nil {
+			return err
+		}
 		// Search config in home directory with name ".skima" (without extension).
 		viper.AddConfigPath(home)
 		viper.AddConfigPath(".")
@@ -109,10 +162,9 @@ func initConfig() {
 	}
 
 	// a password on the command line can be read by any user on the machine (ps, /proc) and lands in shell history
-	for _, flag := range []string{"dbpassword", "dbsuperuserpwd"} {
-		if rootCmd.PersistentFlags().Changed(flag) {
-			fmt.Fprintf(os.Stderr, "WARNING: --%s is visible to other users in the process list - set %s or put it in the config file instead\n",
-				flag, map[string]string{"dbpassword": "SKM_DBCONN_PASSWORD", "dbsuperuserpwd": "SKM_DBCONN_SUPERUSERPWD"}[flag])
+	for flag, env := range map[string]string{"dbpassword": "SKM_DBCONN_PASSWORD", "dbsuperuserpwd": "SKM_DBCONN_SUPERUSERPWD"} {
+		if cmd.Flags().Changed(flag) {
+			fmt.Fprintf(cmd.ErrOrStderr(), "WARNING: --%s is visible to other users in the process list - set %s or put it in the config file instead\n", flag, env)
 		}
 	}
 
@@ -124,13 +176,13 @@ func initConfig() {
 	// environment variables instead. But a config file that was named with --config, or that exists, must be readable -
 	// carrying on without it could apply to the wrong database
 	if err := viper.ReadInConfig(); err == nil {
-		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
+		fmt.Fprintln(cmd.ErrOrStderr(), "Using config file:", viper.ConfigFileUsed())
 	} else if _, notFound := err.(viper.ConfigFileNotFoundError); !notFound {
-		file := cfgFile
+		file := opts.cfgFile
 		if file == "" {
 			file = viper.ConfigFileUsed()
 		}
-		fmt.Fprintf(os.Stderr, "ERROR: unable to read the config file %s: %s\n", file, err)
-		os.Exit(1)
+		return fmt.Errorf("unable to read the config file %s: %w", file, err)
 	}
+	return nil
 }

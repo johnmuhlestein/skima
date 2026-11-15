@@ -3,8 +3,9 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
+	"path/filepath"
 	"regexp"
 
 	"github.com/jackc/pgx/v5"
@@ -16,18 +17,23 @@ import (
 	"github.com/spf13/viper"
 )
 
-var planFrom string
-var showScripts bool
-var detailedExitcode bool
-
 // a version as --from accepts it: 1.4.2, v1_4_2, 1.4.2-rc.1
 var versionPattern = regexp.MustCompile(`^v?\d+[._]\d+[._]\d+(-[A-Za-z]+([._]\d+)?)?$`)
 
-// planCmd represents the plan command
-var planCmd = &cobra.Command{
-	Use:   "plan",
-	Short: "Shows what skima apply would run, without changing the database.",
-	Long: `Lists every statement skima apply would run against the schema, in the order it runs them, without applying
+// planOptions are plan's flags - apply --dry-run plans with its own skip-validation
+type planOptions struct {
+	from             string
+	showScripts      bool
+	detailedExitcode bool
+	skipValidation   bool
+}
+
+func newPlanCmd(root *rootOptions) *cobra.Command {
+	opts := &planOptions{}
+	cmd := &cobra.Command{
+		Use:   "plan",
+		Short: "Shows what skima apply would run, without changing the database.",
+		Long: `Lists every statement skima apply would run against the schema, in the order it runs them, without applying
 anything - the same as skima apply --dry-run.
 
 By default plan connects to the database to read the deployed version from the history tables. It only reads: it does
@@ -53,94 +59,115 @@ Example:
   skima plan --from none --show-scripts
   skima plan --from 1.4.2 --output=json
   skima apply --dry-run`,
-	Args: cobra.NoArgs,
-	Run: func(cmd *cobra.Command, args []string) {
-		runPlan(cmd.Context(), planFrom)
-	},
-}
-
-func init() {
-	rootCmd.AddCommand(planCmd)
-	planCmd.Flags().StringVar(&planFrom, "from", "", "Plan from this deployed version without connecting to the database - 'none' plans the state build of a new schema")
-	planCmd.Flags().BoolVar(&showScripts, "show-scripts", false, "Print the contents of the sql files the plan runs, not just their names")
-	planCmd.Flags().BoolVar(&detailedExitcode, "detailed-exitcode", false, "Exit with 2 when there are changes to apply (0 when there are none, 1 on an error)")
-	planCmd.Flags().BoolVar(&skipValidation, "skip-validation", false, "Plan without first validating the manifest files against the skima JSON schemas")
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runPlan(cmd, root, opts)
+		},
+	}
+	cmd.Flags().StringVar(&opts.from, "from", "", "Plan from this deployed version without connecting to the database - 'none' plans the state build of a new schema")
+	cmd.Flags().BoolVar(&opts.showScripts, "show-scripts", false, "Print the contents of the sql files the plan runs, not just their names")
+	cmd.Flags().BoolVar(&opts.detailedExitcode, "detailed-exitcode", false, "Exit with 2 when there are changes to apply (0 when there are none, 1 on an error)")
+	cmd.Flags().BoolVar(&opts.skipValidation, "skip-validation", false, "Plan without first validating the manifest files against the skima JSON schemas")
+	return cmd
 }
 
 // runPlan plans the apply from the given version - read from the database when from is empty - and prints the plan
-func runPlan(ctx context.Context, from string) {
-	var p plan.Plan
-	var err error
-	deployed, managed := deployedVersion(ctx, from)
-	if managed {
-		validateOrExit(pendingChangesets(deployed), "skima apply would not apply anything")
-		p, err = plan.ForChangesets(deployed)
-	} else {
-		validateOrExit(nil, "skima apply would not apply anything")
-		p, err = plan.ForState(viper.GetBool("state.transaction"))
-	}
+func runPlan(cmd *cobra.Command, root *rootOptions, opts *planOptions) error {
+	deployed, managed, err := deployedVersion(cmd.Context(), opts.from)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ERROR: unable to plan the apply:", err)
-		os.Exit(1)
+		return err
+	}
+	var p plan.Plan
+	if managed {
+		pending, err := pendingChangesets(deployed)
+		if err != nil {
+			return err
+		}
+		if err = validateFor(cmd, opts.skipValidation, pending, "skima apply would not apply anything", false); err != nil {
+			return err
+		}
+		p, err = plan.ForChangesets(deployed)
+		if err != nil {
+			return fmt.Errorf("unable to plan the apply: %w", err)
+		}
+	} else {
+		if err = validateFor(cmd, opts.skipValidation, nil, "skima apply would not apply anything", false); err != nil {
+			return err
+		}
+		if p, err = plan.ForState(viper.GetBool("state.transaction")); err != nil {
+			return fmt.Errorf("unable to plan the apply: %w", err)
+		}
 	}
 
-	if output == "json" {
+	if root.json() {
 		jsonOutput, err := json.MarshalIndent(p, "", "  ")
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "Unable to marshal the plan into JSON", err)
-			os.Exit(1)
+			return fmt.Errorf("unable to marshal the plan into JSON: %w", err)
 		}
-		fmt.Println(string(jsonOutput))
+		fmt.Fprintln(cmd.OutOrStdout(), string(jsonOutput))
 	} else {
-		plan.Render(os.Stdout, p, plan.RenderOptions{ShowScripts: showScripts})
+		plan.Render(cmd.OutOrStdout(), p, plan.RenderOptions{ShowScripts: opts.showScripts})
 	}
-	if detailedExitcode && p.Pending() {
-		os.Exit(2)
+	if opts.detailedExitcode && p.Pending() {
+		return exitCode(2)
 	}
+	return nil
 }
 
 // deployedVersion returns the version to plan from and whether skima manages the schema - when it does not, apply
 // builds the schema from the state files. Without --from the version is read from the database's history tables
-func deployedVersion(ctx context.Context, from string) (util.SemanticVersion, bool) {
+func deployedVersion(ctx context.Context, from string) (util.SemanticVersion, bool, error) {
 	switch {
 	case from == "none":
-		return util.SemanticVersion{}, false
+		return util.SemanticVersion{}, false, nil
 	case from != "":
 		if !versionPattern.MatchString(from) {
-			fmt.Fprintf(os.Stderr, "--from must be a version such as 1.4.2 or 1.4.2-rc.1, or 'none' for a new schema - got %q\n", from)
-			os.Exit(1)
+			return util.SemanticVersion{}, false, fmt.Errorf("--from must be a version such as 1.4.2 or 1.4.2-rc.1, or 'none' for a new schema - got %q", from)
 		}
-		return util.ExtractVersion(from), true
+		return util.ExtractVersion(from), true, nil
 	}
 	hist, err := db.GetApplyHistory(ctx)
-	switch err {
-	case nil:
-		return hist.SchemaVersion, true
-	case db.ErrNoHistTable, pgx.ErrNoRows:
-		return util.SemanticVersion{}, false
+	switch {
+	case err == nil:
+		return hist.SchemaVersion, true, nil
+	case errors.Is(err, db.ErrNoHistTable), errors.Is(err, pgx.ErrNoRows):
+		return util.SemanticVersion{}, false, nil
 	default:
-		fmt.Fprintln(os.Stderr, "Unable to retrieve the apply history:", err)
-		os.Exit(1)
+		return util.SemanticVersion{}, false, fmt.Errorf("unable to retrieve the apply history: %w", err)
 	}
-	return util.SemanticVersion{}, false
 }
 
-// validateOrExit validates what apply would validate - the state files and the given changesets - and exits if any
-// is invalid. consequence says what that means, e.g. that apply would stop there
-func validateOrExit(changesets []string, consequence string) {
-	if skipValidation {
-		return
+// validateFor validates what apply would validate - the state files and the given changesets - and returns an error
+// if any is invalid, after listing the problems. consequence says what that means, e.g. that apply would stop there.
+// announce says so before validating, as apply does
+func validateFor(cmd *cobra.Command, skip bool, changesets []string, consequence string, announce bool) error {
+	if skip {
+		if announce {
+			fmt.Fprintln(cmd.OutOrStdout(), "Skipping manifest validation (--skip-validation)")
+		}
+		return nil
 	}
 	results, err := manifest.ValidateForApply(viper.GetString("workdir"), changesets)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Unable to read the manifest files:", err)
-		os.Exit(1)
+		return fmt.Errorf("unable to read the manifest files: %w", err)
+	}
+	if announce {
+		fmt.Fprintln(cmd.OutOrStdout(), "Validating the manifest files")
 	}
 	for _, r := range results {
 		if !r.Valid {
-			reportValidation(results, false, false)
-			fmt.Fprintf(os.Stderr, "ERROR: the manifest is invalid - %s. Fix the files above, or rerun with --skip-validation\n", consequence)
-			os.Exit(1)
+			reportValidation(cmd, results, false, false)
+			return fmt.Errorf("the manifest is invalid - %s. Fix the files above, or rerun with --skip-validation", consequence)
 		}
 	}
+	return nil
+}
+
+// pendingChangesets returns the changeset files newer than the deployed version, in the order they are applied
+func pendingChangesets(deployed util.SemanticVersion) ([]string, error) {
+	files, err := manifest.ListFiles(filepath.Join(viper.GetString("workdir"), "deltas"), "json")
+	if err != nil {
+		return nil, fmt.Errorf("unable to read the changeset files: %w", err)
+	}
+	return util.NewerVersions(deployed, files), nil
 }

@@ -2,7 +2,7 @@ package cmd
 
 import (
 	"fmt"
-	"os"
+	"io"
 	"path/filepath"
 
 	"github.com/johnmuhlestein/skima/internal/manifest"
@@ -11,13 +11,12 @@ import (
 	"github.com/spf13/viper"
 )
 
-var tablename string
-
-// parseCmd represents the parse command
-var parseCmd = &cobra.Command{
-	Use:   "parse",
-	Short: "Parses manifest files and shows what they contain.",
-	Long: `Parses manifest files without connecting to a database - useful for checking
+func newParseCmd() *cobra.Command {
+	var table string
+	cmd := &cobra.Command{
+		Use:   "parse",
+		Short: "Parses manifest files and shows what they contain.",
+		Long: `Parses manifest files without connecting to a database - useful for checking
 a definition before applying it.
 
 Use --table to parse a table's state definition and print the DDL that would be
@@ -29,61 +28,50 @@ parsed and each of its deltas is printed.
 Example:
   skima manifest parse --table documents
   skima manifest parse`,
-	Run: func(cmd *cobra.Command, args []string) {
-		if len(tablename) > 0 {
-			ptable, err := manifest.ParseTableByName(tablename)
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			if table == "" {
+				return evalDeltas(out)
+			}
+			parsed, err := manifest.ParseTableByName(table)
 			if err != nil {
-				fmt.Printf("Unable to parse %s: %s\n", tablename, err)
-				os.Exit(-1)
+				return fmt.Errorf("unable to parse %s: %w", table, err)
 			}
-			tableDdl := ptable.GenerateDdl()
-			fkDdl := ptable.GenerateFkDdl()
-
-			fmt.Println("Table DDL:")
-			fmt.Println(tableDdl)
-			fmt.Println("FKs:")
-			for _, fk := range fkDdl {
-				fmt.Println(fk)
+			fmt.Fprintln(out, "Table DDL:")
+			fmt.Fprintln(out, parsed.GenerateDdl())
+			fmt.Fprintln(out, "FKs:")
+			for _, fk := range parsed.GenerateFkDdl() {
+				fmt.Fprintln(out, fk)
 			}
-		} else {
-			evalDeltas()
-		}
-	},
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&table, "table", "t", "", "A specific table you'd like to parse")
+	return cmd
 }
 
-func init() {
-	manifestCmd.AddCommand(parseCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// parseCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	parseCmd.Flags().StringVarP(&tablename, "table", "t", "", "A specific table you'd like to parse")
-}
-
-func evalDeltas() {
-	fmt.Println("evaluating deltas...")
+func evalDeltas(out io.Writer) error {
+	fmt.Fprintln(out, "evaluating deltas...")
 	deltas, err := manifest.ListFiles(filepath.Join(viper.GetString("workdir"), "deltas"), "json")
-	check(err)
+	if err != nil {
+		return err
+	}
 	// sort by semantic version - directory order is by file name, which puts v1_0_9 after v1_0_10
 	deltas = util.NewerVersions(util.ExtractVersion("0.0.0"), deltas)
 	if len(deltas) == 0 {
-		fmt.Println("No changeset files found")
-		return
+		fmt.Fprintln(out, "No changeset files found")
+		return nil
 	}
 	last := deltas[len(deltas)-1]
-	fmt.Printf("Parsing %s\n", filepath.Base(last))
+	fmt.Fprintf(out, "Parsing %s\n", filepath.Base(last))
 	cs, err := manifest.ParseChangeSet(last)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Unable to parse %s: %s\n", filepath.Base(last), err)
-		os.Exit(1)
+		return fmt.Errorf("unable to parse %s: %w", filepath.Base(last), err)
 	}
 	for idx, delta := range cs.Deltas {
-		fmt.Printf("ChangeSet %d: \n", idx+1)
-		fmt.Printf("  Object type: %s\n", delta)
+		fmt.Fprintf(out, "ChangeSet %d: \n", idx+1)
+		fmt.Fprintf(out, "  Object type: %s\n", delta)
 	}
+	return nil
 }

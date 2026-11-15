@@ -3,7 +3,6 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/johnmuhlestein/skima/internal/manifest"
@@ -12,14 +11,12 @@ import (
 	"github.com/spf13/viper"
 )
 
-var fileKind string
-var sinceVersion string
-
-// validateCmd represents the manifest validate command
-var validateCmd = &cobra.Command{
-	Use:   "validate [file...]",
-	Short: "Validates manifest files against the skima JSON schemas and checks their references.",
-	Long: `Checks manifest files without connecting to a database. Each file is validated against the JSON schema for
+func newValidateCmd(root *rootOptions) *cobra.Command {
+	var fileKind, sinceVersion string
+	cmd := &cobra.Command{
+		Use:   "validate [file...]",
+		Short: "Validates manifest files against the skima JSON schemas and checks their references.",
+		Long: `Checks manifest files without connecting to a database. Each file is validated against the JSON schema for
 its kind (table, view or changeset): unknown or misspelled properties, missing required properties, invalid values
 and invalid JSON are all reported, with the location of each problem in the file.
 
@@ -50,57 +47,56 @@ Example:
   skima manifest validate --type changeset proposed-change.json
   skima manifest validate --since 1.4.2
   skima manifest validate --output=json`,
-	Run: func(cmd *cobra.Command, args []string) {
-		var errorsAfter *util.SemanticVersion
-		if sinceVersion != "" {
-			since := util.ExtractVersion(sinceVersion)
-			errorsAfter = &since
-		}
-		var results []manifest.FileValidation
-		var err error
-		if len(args) == 0 {
-			results, err = manifest.ValidateManifest(viper.GetString("workdir"), errorsAfter)
-		} else {
-			kinds := map[string]manifest.FileKind{}
-			var paths []string
-			var unknown []manifest.FileValidation
-			for _, path := range args {
-				kind := manifest.FileKind(fileKind)
-				if kind == "" {
-					var ok bool
-					if kind, ok = manifest.KindOf(path); !ok {
-						unknown = append(unknown, manifest.FileValidation{File: path, Issues: []manifest.ValidationIssue{{
-							Severity: manifest.SeverityError,
-							Message:  "unable to tell the file kind from its name - use --type table, view or changeset",
-						}}})
-						continue
-					}
-				}
-				kinds[path] = kind
-				paths = append(paths, path)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var errorsAfter *util.SemanticVersion
+			if sinceVersion != "" {
+				since := util.ExtractVersion(sinceVersion)
+				errorsAfter = &since
 			}
-			results, err = manifest.ValidateSelected(viper.GetString("workdir"), paths, kinds, errorsAfter)
-			results = append(results, unknown...)
-		}
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "Unable to read the manifest:", err)
-			os.Exit(1)
-		}
-		if invalid := reportValidation(results, true, output == "json"); invalid > 0 {
-			os.Exit(1)
-		}
-	},
-}
-
-func init() {
-	manifestCmd.AddCommand(validateCmd)
-	validateCmd.Flags().StringVar(&sinceVersion, "since", "", "Report reference problems as errors in changesets newer than this version (e.g. the deployed version) - older ones are warnings")
-	validateCmd.Flags().StringVar(&fileKind, "type", "", "The kind of every file given as an argument (table, view or changeset) - by default it comes from the file name")
+			var results []manifest.FileValidation
+			var err error
+			if len(args) == 0 {
+				results, err = manifest.ValidateManifest(viper.GetString("workdir"), errorsAfter)
+			} else {
+				kinds := map[string]manifest.FileKind{}
+				var paths []string
+				var unknown []manifest.FileValidation
+				for _, path := range args {
+					kind := manifest.FileKind(fileKind)
+					if kind == "" {
+						var ok bool
+						if kind, ok = manifest.KindOf(path); !ok {
+							unknown = append(unknown, manifest.FileValidation{File: path, Issues: []manifest.ValidationIssue{{
+								Severity: manifest.SeverityError,
+								Message:  "unable to tell the file kind from its name - use --type table, view, enum, sequence, matview or changeset",
+							}}})
+							continue
+						}
+					}
+					kinds[path] = kind
+					paths = append(paths, path)
+				}
+				results, err = manifest.ValidateSelected(viper.GetString("workdir"), paths, kinds, errorsAfter)
+				results = append(results, unknown...)
+			}
+			if err != nil {
+				return fmt.Errorf("unable to read the manifest: %w", err)
+			}
+			if invalid := reportValidation(cmd, results, true, root.json()); invalid > 0 {
+				return exitCode(1)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&sinceVersion, "since", "", "Report reference problems as errors in changesets newer than this version (e.g. the deployed version) - older ones are warnings")
+	cmd.Flags().StringVar(&fileKind, "type", "", "The kind of every file given as an argument (table, view, enum, sequence, matview or changeset) - by default it comes from the file name")
+	return cmd
 }
 
 // reportValidation prints the validation results as JSON, or as text listing every file when showValid is true and
 // otherwise only the invalid ones. It returns the number of invalid files
-func reportValidation(results []manifest.FileValidation, showValid bool, asJSON bool) int {
+func reportValidation(cmd *cobra.Command, results []manifest.FileValidation, showValid bool, asJSON bool) int {
+	out, errOut := cmd.OutOrStdout(), cmd.ErrOrStderr()
 	invalid := 0
 	for _, r := range results {
 		if !r.Valid {
@@ -110,9 +106,9 @@ func reportValidation(results []manifest.FileValidation, showValid bool, asJSON 
 	if asJSON {
 		jsonOutput, err := json.MarshalIndent(results, "", "  ")
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "Unable to marshal the validation results into JSON", err)
+			fmt.Fprintln(errOut, "Unable to marshal the validation results into JSON", err)
 		} else {
-			fmt.Println(string(jsonOutput))
+			fmt.Fprintln(out, string(jsonOutput))
 		}
 		return invalid
 	}
@@ -121,12 +117,12 @@ func reportValidation(results []manifest.FileValidation, showValid bool, asJSON 
 		file := displayPath(r.File)
 		switch {
 		case !r.Valid:
-			fmt.Fprintf(os.Stderr, "INVALID  %s\n", file)
+			fmt.Fprintf(errOut, "INVALID  %s\n", file)
 		case r.Warnings() > 0:
-			fmt.Fprintf(os.Stderr, "WARN     %s\n", file)
+			fmt.Fprintf(errOut, "WARN     %s\n", file)
 		default:
 			if showValid {
-				fmt.Printf("ok       %s\n", file)
+				fmt.Fprintf(out, "ok       %s\n", file)
 			}
 			continue
 		}
@@ -140,7 +136,7 @@ func reportValidation(results []manifest.FileValidation, showValid bool, asJSON 
 				warnings++
 				prefix = "warning: "
 			}
-			fmt.Fprintf(os.Stderr, "         %s%s: %s\n", prefix, location, issue.Message)
+			fmt.Fprintf(errOut, "         %s%s: %s\n", prefix, location, issue.Message)
 		}
 	}
 	files := "files"
@@ -155,7 +151,7 @@ func reportValidation(results []manifest.FileValidation, showValid bool, asJSON 
 		}
 		summary += fmt.Sprintf(", %d warning%s (changeset reference problems - use --since <deployed version> to make them errors in newer changesets)", warnings, plural)
 	}
-	fmt.Println(summary)
+	fmt.Fprintln(out, summary)
 	return invalid
 }
 

@@ -2,8 +2,9 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
+	"io"
 	"path/filepath"
 	"time"
 
@@ -16,21 +17,23 @@ import (
 	"github.com/spf13/viper"
 )
 
-var bootstrap bool
-var hist bool
-var baseline bool
-var baselineVersion string
-var skipValidation bool
-var statesql bool
-var dryRun bool
-var activeApplyHist db.ApplyHistory
-var manifestVersion util.SemanticVersion
+// applyOptions are apply's flags
+type applyOptions struct {
+	bootstrap       bool
+	hist            bool
+	baseline        bool
+	baselineVersion string
+	skipValidation  bool
+	stateSql        bool
+	dryRun          bool
+}
 
-// applyCmd represents the apply command
-var applyCmd = &cobra.Command{
-	Use:   "apply",
-	Short: "Applies schema to the database.",
-	Long: `Creates database resources in the designated database.
+func newApplyCmd(root *rootOptions) *cobra.Command {
+	opts := &applyOptions{}
+	cmd := &cobra.Command{
+		Use:   "apply",
+		Short: "Applies schema to the database.",
+		Long: `Creates database resources in the designated database.
 
 Without designating any additional flags, the behavior is to apply the schema defined in the referenced workdir configuration
 This means checking the skima_schema_history table to see if:
@@ -69,221 +72,229 @@ This does the following:
   3. grants all privileges on the objects in the schema to the user, including grant rights
   4. sets the search path for the user to ONLY the new schema
 `,
-	Run: func(cmd *cobra.Command, args []string) {
-		ctx := cmd.Context()
-		if dryRun {
-			runPlan(ctx, "")
-			return
-		}
-		manifestVersion = manifest.Version()
-		var failures int
-		if bootstrap {
-			if len(viper.GetString("dbconn.superuser")) == 0 || len(viper.GetString("dbconn.superuserpwd")) == 0 {
-				fmt.Fprintln(os.Stderr, "--bootstrap requires the superuser credentials - set --dbsuperuser and --dbsuperuserpwd (or SKM_DBCONN_SUPERUSER and SKM_DBCONN_SUPERUSERPWD)")
-				os.Exit(1)
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.dryRun {
+				return runPlan(cmd, root, &planOptions{skipValidation: opts.skipValidation})
 			}
-			if len(viper.GetString("dbconn.schema")) == 0 {
-				fmt.Fprintln(os.Stderr, "--bootstrap requires a schema name - set --dbschema or SKM_DBCONN_SCHEMA")
-				os.Exit(1)
-			}
-			if len(viper.GetString("dbconn.username")) == 0 {
-				// the user defaults to the schema name - set before connecting so the history tables use it too
-				viper.Set("dbconn.username", viper.GetString("dbconn.schema"))
-			}
-			exitOnError(ctx, db.Bootstrap(ctx, viper.GetString("dbconn.superuser"), viper.GetString("dbconn.superuserpwd"), os.Stdout))
-			exitOnError(ctx, db.LockApply(ctx, viper.GetDuration("lock.timeout"), os.Stdout))
-			exitOnError(ctx, db.CreateHistTables(ctx, os.Stdout))
-			return
-		}
-		// only one apply runs against a schema at a time - a concurrent apply waits here
-		exitOnError(ctx, db.LockApply(ctx, viper.GetDuration("lock.timeout"), os.Stdout))
-		var err error
-		if hist {
-			exitOnError(ctx, db.CreateHistTables(ctx, os.Stdout))
-		} else if baseline {
-			exitOnError(ctx, db.CreateHistTables(ctx, os.Stdout))
-			version := util.ExtractVersion(baselineVersion)
-			activeApplyHist, err = db.InitializeHistory(ctx, version, "baseline", "")
-			exitOnError(ctx, err)
-			activeApplyHist.Status = "success"
-			exitOnError(ctx, db.FinalizeHistory(ctx, &activeApplyHist))
-		} else if statesql {
-			p := mustPlan(plan.ForStateSql(viper.GetBool("state.transaction")))
-			activeApplyHist, err = db.InitializeHistory(ctx, manifestVersion, "sql", "")
-			exitOnError(ctx, err)
-			failures = applyUnit(ctx, p.Units[0])
-		} else {
-			hist, err := db.GetApplyHistory(ctx)
-			switch err {
-			case nil:
-				fmt.Printf("Version %s is currently deployed - checking for a more current version to deploy\n", hist.SchemaVersion.String())
-				// changesets take their definitions from the state files, so those are validated too
-				validateBeforeApply(pendingChangesets(hist.SchemaVersion))
-				failures = executeChangesets(ctx, hist.SchemaVersion)
-			case db.ErrNoHistTable:
-				validateBeforeApply(nil)
-				p := mustPlan(plan.ForState(viper.GetBool("state.transaction")))
-				fmt.Println("Schema is not yet managed by skima - creating the history tables")
-				exitOnError(ctx, db.CreateHistTables(ctx, os.Stdout))
-				fmt.Println("Applying the state definitions")
-				failures = executeState(ctx, p)
-			case pgx.ErrNoRows:
-				validateBeforeApply(nil)
-				p := mustPlan(plan.ForState(viper.GetBool("state.transaction")))
-				fmt.Println("No objects currently managed - will apply the state definition")
-				failures = executeState(ctx, p)
-			default:
-				exitOnError(ctx, fmt.Errorf("unable to retrieve the apply history: %w", err))
-			}
-			if ctx.Err() != nil {
-				os.Exit(exitInterrupted)
-			}
-			hist, err = db.GetApplyHistory(ctx)
-			switch err {
-			case nil:
-				fmt.Printf("Last successfully completed version: %s on %s\n", hist.SchemaVersion.String(), hist.CompletionTimestamp.String())
-			case pgx.ErrNoRows:
-				fmt.Println("No successful builds found")
-			default:
-				fmt.Fprintf(os.Stderr, "unable to retrieve apply history: %s\n", err)
-			}
-		}
-		if ctx.Err() != nil {
-			os.Exit(exitInterrupted)
-		}
-		// exit codes are 0-255, so a raw failure count of 256 would report success
-		if failures > 0 {
-			os.Exit(1)
-		}
-	},
-}
-
-func init() {
-	rootCmd.AddCommand(applyCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	applyCmd.Flags().BoolVar(&bootstrap, "bootstrap", false, "Only run a db bootstrap")
-	applyCmd.Flags().BoolVar(&hist, "hist", false, "Only apply the history tables to an existing schema")
-	applyCmd.Flags().BoolVar(&baseline, "baseline", false, "Takes an existing schema that is not managed by skima and sets up the history tables and sets an initial")
-	applyCmd.Flags().StringVar(&baselineVersion, "baseline-version", "1.0.0", "The version to apply to the baseline - 1.0.0 by default")
-	applyCmd.MarkFlagsMutuallyExclusive("bootstrap", "hist", "baseline")
-	applyCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be applied without changing the database - the same as skima plan")
-	applyCmd.Flags().BoolVar(&skipValidation, "skip-validation", false, "Apply without first validating the manifest files against the skima JSON schemas")
-	applyCmd.Flags().BoolVar(&statesql, "sql", false, "Only apply the sql files that are part of the state definition")
-	applyCmd.Flags().Bool("state-transaction", true, "Apply the state build (and --sql) in a single transaction - set to false when a state sql file cannot run inside a transaction - overrides the config file value")
-	cobra.CheckErr(viper.BindPFlag("state.transaction", applyCmd.Flags().Lookup("state-transaction")))
-	applyCmd.Flags().Duration("lock-timeout", 5*time.Minute, "How long to wait for another apply against the schema to finish (e.g. 30s, 15m) - 0 waits indefinitely - overrides the config file value")
-	cobra.CheckErr(viper.BindPFlag("lock.timeout", applyCmd.Flags().Lookup("lock-timeout")))
+			a := &applier{ctx: cmd.Context(), cmd: cmd, out: cmd.OutOrStdout(), errOut: cmd.ErrOrStderr(), skipValidation: opts.skipValidation}
+			return a.apply(opts)
+		},
+	}
+	flags := cmd.Flags()
+	flags.BoolVar(&opts.bootstrap, "bootstrap", false, "Only run a db bootstrap")
+	flags.BoolVar(&opts.hist, "hist", false, "Only apply the history tables to an existing schema")
+	flags.BoolVar(&opts.baseline, "baseline", false, "Takes an existing schema that is not managed by skima and sets up the history tables and sets an initial")
+	flags.StringVar(&opts.baselineVersion, "baseline-version", "1.0.0", "The version to apply to the baseline - 1.0.0 by default")
+	cmd.MarkFlagsMutuallyExclusive("bootstrap", "hist", "baseline")
+	flags.BoolVar(&opts.dryRun, "dry-run", false, "Show what would be applied without changing the database - the same as skima plan")
+	flags.BoolVar(&opts.skipValidation, "skip-validation", false, "Apply without first validating the manifest files against the skima JSON schemas")
+	flags.BoolVar(&opts.stateSql, "sql", false, "Only apply the sql files that are part of the state definition")
+	flags.Bool("state-transaction", true, "Apply the state build (and --sql) in a single transaction - set to false when a state sql file cannot run inside a transaction - overrides the config file value")
+	cobra.CheckErr(viper.BindPFlag("state.transaction", flags.Lookup("state-transaction")))
+	flags.Duration("lock-timeout", 5*time.Minute, "How long to wait for another apply against the schema to finish (e.g. 30s, 15m) - 0 waits indefinitely - overrides the config file value")
+	cobra.CheckErr(viper.BindPFlag("lock.timeout", flags.Lookup("lock-timeout")))
 	for _, flag := range []string{"bootstrap", "hist", "baseline", "sql"} {
-		applyCmd.MarkFlagsMutuallyExclusive("dry-run", flag)
+		cmd.MarkFlagsMutuallyExclusive("dry-run", flag)
 	}
+	return cmd
 }
 
-// pendingChangesetFiles returns the changeset files newer than the deployed version, in the order they are applied
-func pendingChangesetFiles(deployed util.SemanticVersion) ([]string, error) {
-	deltaFileNames, err := manifest.ListFiles(filepath.Join(viper.GetString("workdir"), "deltas"), "json")
+// applier runs one skima apply: the runs it applies and records
+type applier struct {
+	ctx            context.Context
+	cmd            *cobra.Command
+	out, errOut    io.Writer
+	skipValidation bool
+	// failures counts the failed statements of the runs applied
+	failures int
+}
+
+// errApplyFailed ends an apply that recorded failures - they were reported as they happened
+var errApplyFailed = exitCode(1)
+
+func (a *applier) apply(opts *applyOptions) error {
+	ctx := a.ctx
+	if opts.bootstrap {
+		if viper.GetString("dbconn.superuser") == "" || viper.GetString("dbconn.superuserpwd") == "" {
+			return errors.New("--bootstrap requires the superuser credentials - set SKM_DBCONN_SUPERUSER and SKM_DBCONN_SUPERUSERPWD (or --dbsuperuser and --dbsuperuserpwd)")
+		}
+		if viper.GetString("dbconn.schema") == "" {
+			return errors.New("--bootstrap requires a schema name - set --dbschema or SKM_DBCONN_SCHEMA")
+		}
+		if viper.GetString("dbconn.username") == "" {
+			// the user defaults to the schema name - set before connecting so the history tables use it too
+			viper.Set("dbconn.username", viper.GetString("dbconn.schema"))
+		}
+		if err := db.Bootstrap(ctx, viper.GetString("dbconn.superuser"), viper.GetString("dbconn.superuserpwd"), a.out); err != nil {
+			return err
+		}
+		unlock, err := db.LockApply(ctx, viper.GetDuration("lock.timeout"), a.out)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		return db.CreateHistTables(ctx, a.out)
+	}
+
+	// only one apply runs against a schema at a time - a concurrent apply waits here
+	unlock, err := db.LockApply(ctx, viper.GetDuration("lock.timeout"), a.out)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return util.NewerVersions(deployed, deltaFileNames), nil
-}
+	defer unlock()
+	switch {
+	case opts.hist:
+		return db.CreateHistTables(ctx, a.out)
+	case opts.baseline:
+		if err := db.CreateHistTables(ctx, a.out); err != nil {
+			return err
+		}
+		run, err := db.InitializeHistory(ctx, util.ExtractVersion(opts.baselineVersion), "baseline", "")
+		if err != nil {
+			return err
+		}
+		run.Status = "success"
+		return db.FinalizeHistory(ctx, &run)
+	case opts.stateSql:
+		p, err := plan.ForStateSql(viper.GetBool("state.transaction"))
+		if err != nil {
+			return planError(err)
+		}
+		if err = a.applyUnit(p.Units[0], manifest.Version(), "sql", ""); err != nil {
+			return err
+		}
+		return a.result()
+	}
 
-func pendingChangesets(deployed util.SemanticVersion) []string {
-	changes, err := pendingChangesetFiles(deployed)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "Unable to read the changeset files:", err)
-		os.Exit(1)
+	hist, err := db.GetApplyHistory(ctx)
+	switch {
+	case err == nil:
+		fmt.Fprintf(a.out, "Version %s is currently deployed - checking for a more current version to deploy\n", hist.SchemaVersion.String())
+		pending, err := pendingChangesets(hist.SchemaVersion)
+		if err != nil {
+			return err
+		}
+		// changesets take their definitions from the state files, so those are validated too
+		if err = a.validate(pending); err != nil {
+			return err
+		}
+		if err = a.applyChangesets(hist.SchemaVersion); err != nil {
+			return err
+		}
+	case errors.Is(err, db.ErrNoHistTable), errors.Is(err, pgx.ErrNoRows):
+		noHistTables := errors.Is(err, db.ErrNoHistTable)
+		if err := a.validate(nil); err != nil {
+			return err
+		}
+		p, err := plan.ForState(viper.GetBool("state.transaction"))
+		if err != nil {
+			return planError(err)
+		}
+		if noHistTables {
+			fmt.Fprintln(a.out, "Schema is not yet managed by skima - creating the history tables")
+			if err := db.CreateHistTables(ctx, a.out); err != nil {
+				return err
+			}
+			fmt.Fprintln(a.out, "Applying the state definitions")
+		} else {
+			fmt.Fprintln(a.out, "No objects currently managed - will apply the state definition")
+		}
+		if err = a.applyUnit(p.Units[0], p.Units[0].SemVer, "state", ""); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unable to retrieve the apply history: %w", err)
 	}
-	return changes
-}
-
-// validateBeforeApply validates the state files and the given changesets, exiting before anything is applied if any
-// of them is invalid
-func validateBeforeApply(changesets []string) {
-	if skipValidation {
-		fmt.Println("Skipping manifest validation (--skip-validation)")
-		return
-	}
-	results, err := manifest.ValidateForApply(viper.GetString("workdir"), changesets)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "Unable to read the manifest files:", err)
-		os.Exit(1)
-	}
-	fmt.Println("Validating the manifest files")
-	if invalid := reportValidation(results, false, false); invalid > 0 {
-		fmt.Fprintln(os.Stderr, "ERROR: the manifest is invalid - nothing was applied. Fix the files above, or rerun with --skip-validation")
-		os.Exit(1)
-	}
-}
-
-// mustPlan returns the plan, exiting if it could not be made - before anything has been applied
-func mustPlan(p plan.Plan, err error) plan.Plan {
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ERROR: unable to plan the apply - nothing was applied:", err)
-		os.Exit(1)
-	}
-	return p
-}
-
-// executeChangesets plans the changesets newer than the deployed version and applies them in order, each as its own
-// run, stopping at the first that fails. It returns the number of failures
-func executeChangesets(ctx context.Context, deployed util.SemanticVersion) int {
-	p := mustPlan(plan.ForChangesets(deployed))
-	if !p.Pending() {
-		fmt.Printf("There are no changes more current than %s - nothing to see here\n", deployed.String())
-		return 0
-	}
-	fmt.Printf("%d new changesets to apply\n", len(p.Units))
-	for _, unit := range p.Units {
-		var err error
-		activeApplyHist, err = db.InitializeHistory(ctx, unit.SemVer, "changeset", filepath.Base(unit.File))
-		exitOnError(ctx, err)
-		fmt.Printf("Initialized run %d for version %s\n", activeApplyHist.RunId, unit.Version)
-		if failures := applyUnit(ctx, unit); failures > 0 {
-			return failures
+	if ctx.Err() == nil {
+		hist, err := db.GetApplyHistory(ctx)
+		switch {
+		case err == nil:
+			fmt.Fprintf(a.out, "Last successfully completed version: %s on %s\n", hist.SchemaVersion.String(), hist.CompletionTimestamp.String())
+		case errors.Is(err, pgx.ErrNoRows):
+			fmt.Fprintln(a.out, "No successful builds found")
+		default:
+			fmt.Fprintf(a.errOut, "unable to retrieve the apply history: %s\n", err)
 		}
 	}
-	return 0
+	return a.result()
 }
 
-// executeState applies the planned state build. Unless state.transaction is false the whole build runs in a single
-// transaction, so a failure rolls back every object it created
-func executeState(ctx context.Context, p plan.Plan) int {
-	var err error
-	activeApplyHist, err = db.InitializeHistory(ctx, p.Units[0].SemVer, "state", "")
-	exitOnError(ctx, err)
-	fmt.Printf("Executing state files as run: %d\n", activeApplyHist.RunId)
-	return applyUnit(ctx, p.Units[0])
+// result is the apply's outcome once its runs are applied - interrupted, failed or a success
+func (a *applier) result() error {
+	switch {
+	case a.ctx.Err() != nil:
+		return &exitError{code: exitInterrupted}
+	case a.failures > 0:
+		return errApplyFailed
+	}
+	return nil
 }
 
-// applyUnit applies a planned run as the active history run, then reports and records its outcome. It returns the
-// number of failures
-func applyUnit(ctx context.Context, unit plan.Unit) int {
-	failures, err := db.ApplyUnit(ctx, &activeApplyHist, unit, os.Stdout, os.Stderr)
+// validate validates the state files and the given changesets, failing before anything is applied if any of them is
+// invalid
+func (a *applier) validate(changesets []string) error {
+	return validateFor(a.cmd, a.skipValidation, changesets, "nothing was applied", true)
+}
+
+// planError reports a plan that could not be made - before anything has been applied
+func planError(err error) error {
+	return fmt.Errorf("unable to plan the apply - nothing was applied: %w", err)
+}
+
+// applyChangesets plans the changesets newer than the deployed version and applies them in order, each as its own
+// run, stopping at the first that fails
+func (a *applier) applyChangesets(deployed util.SemanticVersion) error {
+	p, err := plan.ForChangesets(deployed)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ERROR:", err)
+		return planError(err)
+	}
+	if !p.Pending() {
+		fmt.Fprintf(a.out, "There are no changes more current than %s - nothing to see here\n", deployed.String())
+		return nil
+	}
+	fmt.Fprintf(a.out, "%d new changesets to apply\n", len(p.Units))
+	for _, unit := range p.Units {
+		if err := a.applyUnit(unit, unit.SemVer, "changeset", filepath.Base(unit.File)); err != nil {
+			return err
+		}
+		if a.failures > 0 || a.ctx.Err() != nil {
+			return nil
+		}
+	}
+	return nil
+}
+
+// applyUnit records a run for the planned unit, applies it, then reports and records its outcome. An error means the
+// run could not be recorded; the unit's failures are counted in a.failures
+func (a *applier) applyUnit(unit plan.Unit, version util.SemanticVersion, applyType string, file string) error {
+	run, err := db.InitializeHistory(a.ctx, version, applyType, file)
+	if err != nil {
+		return err
+	}
+	switch applyType {
+	case "changeset":
+		fmt.Fprintf(a.out, "Initialized run %d for version %s\n", run.RunId, unit.Version)
+	case "state":
+		fmt.Fprintf(a.out, "Executing state files as run: %d\n", run.RunId)
+	}
+	failures, err := db.ApplyUnit(a.ctx, &run, unit, a.out, a.errOut)
+	if err != nil {
+		fmt.Fprintln(a.errOut, "ERROR:", err)
 	}
 	switch {
-	case activeApplyHist.Status == "cancelled":
-		fmt.Fprintf(os.Stderr, "ERROR: RunID %d was interrupted - nothing it applied in a transaction was kept\n", activeApplyHist.RunId)
+	case run.Status == "cancelled":
+		fmt.Fprintf(a.errOut, "ERROR: RunID %d was interrupted - nothing it applied in a transaction was kept\n", run.RunId)
 	case failures > 0:
 		// a failed changeset keeps the status the apply gave it (e.g. fast-fail) - the state build is marked failed
-		if unit.Kind != plan.UnitChangeset && activeApplyHist.Status != "rolled back" {
-			activeApplyHist.Status = "failed"
+		if unit.Kind != plan.UnitChangeset && run.Status != "rolled back" {
+			run.Status = "failed"
 		}
-		fmt.Fprintf(os.Stderr, "ERROR: RunID %d had %d failures applying objects which could indicate additional downstream failures. Review the History to determine failures\n", activeApplyHist.RunId, failures)
+		fmt.Fprintf(a.errOut, "ERROR: RunID %d had %d failures applying objects which could indicate additional downstream failures. Review the History to determine failures\n", run.RunId, failures)
 	default:
-		fmt.Printf("SUCCESS: Run %d completed without failures\n", activeApplyHist.RunId)
-		activeApplyHist.Status = "success"
+		fmt.Fprintf(a.out, "SUCCESS: Run %d completed without failures\n", run.RunId)
+		run.Status = "success"
 	}
-	if err := db.FinalizeHistory(ctx, &activeApplyHist); err != nil {
-		fmt.Fprintln(os.Stderr, "ERROR:", err)
-	}
-	return failures
+	a.failures += failures
+	return db.FinalizeHistory(a.ctx, &run)
 }
