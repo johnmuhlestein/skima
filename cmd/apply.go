@@ -84,7 +84,7 @@ This does the following:
 	flags := cmd.Flags()
 	flags.BoolVar(&opts.bootstrap, "bootstrap", false, "Only run a db bootstrap")
 	flags.BoolVar(&opts.hist, "hist", false, "Only apply the history tables to an existing schema")
-	flags.BoolVar(&opts.baseline, "baseline", false, "Takes an existing schema that is not managed by skima and sets up the history tables and sets an initial")
+	flags.BoolVar(&opts.baseline, "baseline", false, "Adopt an existing schema that skima does not manage yet: create the history tables and record --baseline-version as deployed, without applying anything")
 	flags.StringVar(&opts.baselineVersion, "baseline-version", "1.0.0", "The version to apply to the baseline - 1.0.0 by default")
 	cmd.MarkFlagsMutuallyExclusive("bootstrap", "hist", "baseline")
 	flags.BoolVar(&opts.dryRun, "dry-run", false, "Show what would be applied without changing the database - the same as skima plan")
