@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -54,7 +55,7 @@ Example:
   skima apply --dry-run`,
 	Args: cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
-		runPlan(planFrom)
+		runPlan(cmd.Context(), planFrom)
 	},
 }
 
@@ -67,10 +68,10 @@ func init() {
 }
 
 // runPlan plans the apply from the given version - read from the database when from is empty - and prints the plan
-func runPlan(from string) {
+func runPlan(ctx context.Context, from string) {
 	var p plan.Plan
 	var err error
-	deployed, managed := deployedVersion(from)
+	deployed, managed := deployedVersion(ctx, from)
 	if managed {
 		validateOrExit(pendingChangesets(deployed), "skima apply would not apply anything")
 		p, err = plan.ForChangesets(deployed)
@@ -100,7 +101,7 @@ func runPlan(from string) {
 
 // deployedVersion returns the version to plan from and whether skima manages the schema - when it does not, apply
 // builds the schema from the state files. Without --from the version is read from the database's history tables
-func deployedVersion(from string) (util.SemanticVersion, bool) {
+func deployedVersion(ctx context.Context, from string) (util.SemanticVersion, bool) {
 	switch {
 	case from == "none":
 		return util.SemanticVersion{}, false
@@ -111,7 +112,7 @@ func deployedVersion(from string) (util.SemanticVersion, bool) {
 		}
 		return util.ExtractVersion(from), true
 	}
-	hist, err := db.GetApplyHistory()
+	hist, err := db.GetApplyHistory(ctx)
 	switch err {
 	case nil:
 		return hist.SchemaVersion, true

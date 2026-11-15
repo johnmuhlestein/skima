@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/johnmuhlestein/skima/internal/plan"
@@ -14,13 +13,18 @@ import (
 // ApplyUnit applies a planned run - a changeset, the state build or the state sql files of apply --sql - returning the
 // number of failures. Unless the unit opts out it is applied in a single transaction, so any failure rolls the whole
 // unit back and the schema is left as it was. The history is written on separate connections so it survives a rollback.
-func ApplyUnit(history *ApplyHistory, unit plan.Unit) int {
+//
+// Cancelling ctx (Ctrl+C) stops the run at the statement it is running: the transaction is rolled back and the run is
+// marked 'cancelled'. Progress goes to out, failures to errOut
+func ApplyUnit(ctx context.Context, history *ApplyHistory, unit plan.Unit, out, errOut io.Writer) (int, error) {
 	name, optOut := runName(unit)
-	r := beginRun(history, name, unit.Transactional, optOut)
-	if r == nil {
-		return 1
+	r, err := beginRun(ctx, history, name, unit.Transactional, optOut, out, errOut)
+	if err != nil {
+		history.Status = "failed"
+		return 1, err
 	}
-	return r.finish(executor{ex: r.ex, record: recordStatementHist, history: history, out: os.Stdout, errOut: os.Stderr}.run(unit.Steps))
+	failures := executor{ctx: ctx, ex: r.ex, record: recordStatementHist, history: history, out: out, errOut: errOut}.run(unit.Steps)
+	return r.finish(ctx, failures), nil
 }
 
 // runName names the run in messages, along with how to apply it without a transaction
@@ -42,10 +46,12 @@ const maxViewPasses = 5
 const codeUndefinedTable = "42P01" // relation does not exist
 
 // recordFunc writes a row to the statements history table, returning its statement id
-type recordFunc func(history *ApplyHistory, stmtType string, status string, desc string) (int, error)
+type recordFunc func(ctx context.Context, history *ApplyHistory, stmtType string, status string, desc string) (int, error)
 
 // executor runs a unit's planned steps in order, recording each in the history
 type executor struct {
+	// ctx cancelled stops the run - see interrupted
+	ctx     context.Context
 	ex      execer
 	record  recordFunc
 	history *ApplyHistory
@@ -63,6 +69,9 @@ func (e executor) run(steps []plan.Step) int {
 	failures := 0
 	var retry []plan.Step
 	for _, step := range steps {
+		if e.interrupted() {
+			return failures + 1
+		}
 		if len(retry) > 0 && !step.Retryable {
 			failures += e.retryViews(retry)
 			retry = nil
@@ -84,7 +93,34 @@ func (e executor) run(steps []plan.Step) int {
 			}
 		}
 	}
+	if e.interrupted() {
+		return failures + 1
+	}
 	return failures + e.retryViews(retry)
+}
+
+// interrupted reports whether the run's context was cancelled (Ctrl+C) - the run stops and is marked 'cancelled'
+func (e executor) interrupted() bool {
+	if e.ctx.Err() == nil {
+		return false
+	}
+	if e.history.Status != "cancelled" {
+		e.history.Status = "cancelled"
+		fmt.Fprintln(e.errOut, "Interrupted - the remaining steps were not run")
+	}
+	return true
+}
+
+// recordRow writes a statements history row - also after the context was cancelled, so the history says how far the
+// run got. A row that can't be written is reported to errOut, as what, and the run carries on
+func (e executor) recordRow(stmtType string, status string, desc string, what string) int {
+	ctx, cancel := cleanup(e.ctx)
+	defer cancel()
+	stmtId, err := e.record(ctx, e.history, stmtType, status, desc)
+	if err != nil {
+		fmt.Fprintf(e.errOut, "Unable to record the statement history for %s: %s\n", what, err)
+	}
+	return stmtId
 }
 
 // stoppedStatus is the run status when the step's failure stops the run: a failed sql delta leaves the run 'failed',
@@ -100,7 +136,7 @@ func stoppedStatus(step plan.Step) string {
 // that could not be created
 func (e executor) retryViews(views []plan.Step) int {
 	failures := 0
-	for pass := 0; pass < maxViewPasses && len(views) > 0; pass++ {
+	for pass := 0; pass < maxViewPasses && len(views) > 0 && !e.interrupted(); pass++ {
 		fmt.Fprintf(e.out, "Retrying %d views\n", len(views))
 		var again []plan.Step
 		for _, view := range views {
@@ -124,18 +160,16 @@ func (e executor) retryViews(views []plan.Step) int {
 		if view.Record.FailType != "" {
 			stmtType = view.Record.FailType
 		}
-		stmtId, err := e.record(e.history, stmtType, "failed", "still references a relation that does not exist after retrying")
+		stmtId := e.recordRow(stmtType, "failed", "still references a relation that does not exist after retrying", stepName(view))
 		fmt.Fprintf(e.errOut, "FAILURE: %s still references a relation that does not exist - Statement ID: %d\n", stepName(view), stmtId)
-		checkErr(err, "Unable to record the statement history for "+stepName(view))
 	}
 	return failures + len(views)
 }
 
 // skip records a delta that generates no DDL
 func (e executor) skip(step plan.Step) {
-	stmtId, err := e.record(e.history, step.Record.Type, "deltaSkipped", "No DDL Generated")
+	stmtId := e.recordRow(step.Record.Type, "deltaSkipped", "No DDL Generated", "skipping "+stepName(step))
 	fmt.Fprintf(e.errOut, "WARNING: applying %s was skipped due to no DDL - this could be due to a downstream change that removed this reference object from the state definition - Statement ID: %d\n", step.Describe, stmtId)
-	checkErr(err, "Unable to record the statement history for applying the delta")
 }
 
 // step executes the step's statements in order, stopping at the first that fails with an error the step does not
@@ -148,7 +182,7 @@ func (e executor) step(step plan.Step) (ok bool, missingRelation bool) {
 		statements = step.Shadow
 	}
 	for idx, sql := range statements {
-		_, err := e.ex.Exec(context.Background(), sql)
+		_, err := e.ex.Exec(e.ctx, sql)
 		pgErr := asPgError(err)
 		if err != nil && (pgErr == nil || !tolerated.Has(pgErr.Code)) {
 			e.failed(step, idx, sql, err, pgErr)
@@ -161,13 +195,12 @@ func (e executor) step(step plan.Step) (ok bool, missingRelation bool) {
 		}
 	}
 	if !step.Record.PerStatement {
-		stmtId, err := e.record(e.history, step.Record.Type, "success", step.Record.Name)
+		stmtId := e.recordRow(step.Record.Type, "success", step.Record.Name, stepName(step))
 		if toleratedErr != nil {
 			fmt.Fprintf(e.out, "SUCCESS: %s - tolerated [%s] %s - Statement ID: %d\n", stepName(step), toleratedErr.Code, toleratedErr.Message, stmtId)
 		} else {
 			fmt.Fprintf(e.out, "SUCCESS: %s - Statement ID: %d\n", stepName(step), stmtId)
 		}
-		checkErr(err, "Unable to record the statement history for "+stepName(step))
 	}
 	return true, false
 }
@@ -177,14 +210,12 @@ func (e executor) step(step plan.Step) (ok bool, missingRelation bool) {
 func (e executor) statementSucceeded(step plan.Step, idx int, sql string, pgErr *pgconn.PgError) {
 	stmtType := fmt.Sprintf("%s sql [%d]", step.Record.Type, idx)
 	if pgErr != nil {
-		stmtId, err := e.record(e.history, stmtType, "success", fmt.Sprintf("{[%s] %s} - %s", pgErr.Code, pgErr.Message, sql))
+		stmtId := e.recordRow(stmtType, "success", fmt.Sprintf("{[%s] %s} - %s", pgErr.Code, pgErr.Message, sql), "the sql statement")
 		fmt.Fprintf(e.out, "SUCCESS: sql %s at index [%d] marked as success because failure was due to acceptable condition [%s] %s  Statement ID: %d\n", step.Record.Type, idx, pgErr.Code, pgErr.Message, stmtId)
-		checkErr(err, "Unable to record the statement history for 'SQL statement'")
 		return
 	}
-	stmtId, err := e.record(e.history, stmtType, "success", sql)
+	stmtId := e.recordRow(stmtType, "success", sql, "the sql statement")
 	fmt.Fprintf(e.out, "SUCCESS: sql %s at index [%d] Statement ID: %d\n", step.Record.Type, idx, stmtId)
-	checkErr(err, "Unable to record the statement history for 'SQL statement'")
 }
 
 // failed records the statement that failed - a per-statement step records the statement, other steps the step
@@ -192,13 +223,11 @@ func (e executor) failed(step plan.Step, idx int, sql string, execErr error, pgE
 	if step.Record.PerStatement {
 		stmtType := fmt.Sprintf("%s sql [%d]", step.Record.Type, idx)
 		if pgErr != nil {
-			stmtId, err := e.record(e.history, stmtType, "failed", fmt.Sprintf("{[%s] %s} - %s", pgErr.Code, pgErr.Message, sql))
+			stmtId := e.recordRow(stmtType, "failed", fmt.Sprintf("{[%s] %s} - %s", pgErr.Code, pgErr.Message, sql), "the sql statement")
 			fmt.Fprintf(e.errOut, "FAILURE: sql %s at index [%d] marked as failed because failure was due to unacceptable condition [%s] %s  Statement ID: %d\n", step.Record.Type, idx, pgErr.Code, pgErr.Message, stmtId)
-			checkErr(err, "Unable to record the statement history for 'SQL statement'")
 		} else {
-			stmtId, err := e.record(e.history, stmtType, "failed", execErr.Error())
+			stmtId := e.recordRow(stmtType, "failed", execErr.Error(), "the sql statement")
 			fmt.Fprintf(e.errOut, "FAILURE: executing sql based %s; statement index [%d] - Statement ID: %d\n%s\n", step.Record.Type, idx, stmtId, execErr)
-			checkErr(err, "Unable to record the statement history for 'SQL statement'")
 		}
 		return
 	}
@@ -209,17 +238,15 @@ func (e executor) failed(step plan.Step, idx int, sql string, execErr error, pgE
 	if pgErr != nil && pgErr.Code == codeUndefinedTable && step.Retryable {
 		// retried once the steps planned with it have run - recorded as 'retrying', so a view that succeeds on retry
 		// leaves no failed row in a successful run
-		stmtId, err := e.record(e.history, stmtType, "retrying", execErr.Error())
+		stmtId := e.recordRow(stmtType, "retrying", execErr.Error(), stepName(step))
 		fmt.Fprintf(e.out, "RETRYING: %s references a relation that does not exist yet: %s - Statement ID: %d\n", stepName(step), pgErr.Message, stmtId)
-		checkErr(err, "Unable to record the statement history for "+stepName(step))
 		return
 	}
-	stmtId, err := e.record(e.history, stmtType, "failed", execErr.Error())
+	stmtId := e.recordRow(stmtType, "failed", execErr.Error(), stepName(step))
 	if step.Script == "" {
 		fmt.Fprintln(e.out, sql) // a file's statements are not printed - it is named instead
 	}
 	fmt.Fprintf(e.errOut, "FAILURE: %s - Statement ID: %d\n %s\n", stepName(step), stmtId, execErr)
-	checkErr(err, "Unable to record the statement history for "+stepName(step))
 }
 
 // stepName describes the step in messages, e.g. "table documents" or "add column documents.priority"

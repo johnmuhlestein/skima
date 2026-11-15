@@ -1,6 +1,7 @@
 package verify
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -79,7 +80,7 @@ func boolean(b bool) *bool { return &b }
 
 func expectVerified(t *testing.T, workdir string, baseline changes.Baseline, draft changes.Draft) {
 	t.Helper()
-	report, err := Run(workdir, baseline, draft)
+	report, err := Run(context.Background(), workdir, baseline, draft)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +152,7 @@ func TestVerifyCatchesWrongChangesets(t *testing.T) {
 	}
 
 	// a delta left out: the index is missing
-	report, err := Deltas(workdir, baseline, diff.Deltas[:1])
+	report, err := Deltas(context.Background(), workdir, baseline, diff.Deltas[:1])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +162,7 @@ func TestVerifyCatchesWrongChangesets(t *testing.T) {
 
 	// a delta that fails to apply
 	broken := append(diff.Deltas, changes.Delta{Object: "script", Description: "broken", Sql: []string{"alter table no_such_table add column x integer"}})
-	report, err = Deltas(workdir, baseline, broken)
+	report, err = Deltas(context.Background(), workdir, baseline, broken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +208,7 @@ func fileLocationDelta(d changes.Delta) bool {
 
 func expectFileVerified(t *testing.T, workdir string, baseline changes.Baseline, path string) Report {
 	t.Helper()
-	report, err := File(workdir, baseline, path)
+	report, err := File(context.Background(), workdir, baseline, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +270,7 @@ func TestVerifyHandEditedChangeset(t *testing.T) {
 
 	// a wrong edit: the rename left out, so the column isn't there
 	rewrite(t, path, changes.Changeset{Description: "wrong", Deltas: others})
-	report, err := File(workdir, baseline, path)
+	report, err := File(context.Background(), workdir, baseline, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +281,7 @@ func TestVerifyHandEditedChangeset(t *testing.T) {
 	// an edit that breaks the file is reported before anything runs
 	rewrite(t, path, changes.Changeset{Description: "invalid", Deltas: append([]changes.Delta{{Object: "column", Action: "add", Name: "nope", Reference: "documents"}}, others...)})
 	var invalid *changes.InvalidChangesetError
-	if _, err = File(workdir, baseline, path); !errors.As(err, &invalid) {
+	if _, err = File(context.Background(), workdir, baseline, path); !errors.As(err, &invalid) {
 		t.Errorf("EXPECTED an InvalidChangesetError  ACTUAL: %v", err)
 	}
 }

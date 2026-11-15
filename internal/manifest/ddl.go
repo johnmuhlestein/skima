@@ -2,17 +2,11 @@ package manifest
 
 import (
 	_ "embed"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/johnmuhlestein/skima/internal/util"
-	"github.com/spf13/viper"
 )
 
 const fkddlTmpl = "alter table %s %s constraint %s foreign key (%s) references %s (%s)"
@@ -24,354 +18,6 @@ const dropColTmpl = "alter table %s drop column if exists %s"
 const dropFkTmpl = "alter table %s drop constraint %s"
 const dropTriggerTmpl = "drop trigger if exists %s on %s"
 const dropIndexTmpl = "drop index if exists %s cascade"
-
-//go:embed skima_schema_history-table.json
-var SkimaSchemaHistoryTable []byte
-
-//go:embed skima_schema_statements-table.json
-var SkimaSchemaStatementsTable []byte
-
-type osReader interface {
-	readFile(name string) ([]byte, error)
-	readDir(name string) ([]os.DirEntry, error)
-}
-
-type osReadWrapper struct{}
-
-func (orw osReadWrapper) readFile(name string) ([]byte, error) {
-	b, e := os.ReadFile(name)
-	return b, e
-}
-
-func (orw osReadWrapper) readDir(name string) ([]os.DirEntry, error) {
-	b, e := os.ReadDir(name)
-	return b, e
-}
-
-var reader osReader
-
-func init() {
-	reader = osReadWrapper{}
-}
-
-type Delta interface {
-	GenerateDdl() string
-	StatementType() string
-	Describe() string
-}
-
-type DeltaHook interface {
-	HasPreHook() bool
-	HasPostHook() bool
-}
-
-type PrimaryKeyRef struct {
-	Table   string
-	Columns []string
-}
-
-type ForeignKey struct {
-	Name       string
-	Columns    []string
-	Reference  PrimaryKeyRef
-	DeleteRule string
-	UpdateRule string
-}
-
-type Index struct {
-	Name    string
-	Columns []string
-	Unique  bool
-	Ddl     string
-}
-
-type Column struct {
-	Name       string
-	Datatype   string
-	Nullable   bool
-	Default    string
-	Dfltfunc   bool
-	Primarykey bool
-	Generate   string
-	Comment    string
-}
-
-type Trigger struct {
-	Name string
-	Ddl  string
-}
-
-type Constraint struct {
-	Name      string
-	Type      string
-	Columns   []string
-	Condition string
-}
-
-type Table struct {
-	Name        string
-	Columns     []Column
-	PrimaryKey  []string     `json:"primary-key"`
-	ForeignKeys []ForeignKey `json:"foreign-keys"`
-	Indexes     []Index
-	Triggers    []Trigger
-	Constraints []Constraint
-	Comment     string
-}
-
-type View struct {
-	Name    string
-	Columns []string
-	Sql     string
-	Comment string
-}
-
-// Enum is an enum type - its values in sort order
-type Enum struct {
-	Name    string
-	Values  []string
-	Comment string
-}
-
-// Sequence is a sequence - the settings that are nil take postgres' defaults
-type Sequence struct {
-	Name      string
-	Datatype  string
-	Start     *int64
-	Increment *int64
-	Minvalue  *int64
-	Maxvalue  *int64
-	Cache     *int64
-	Cycle     bool
-	// Ownedby is the table.column that owns the sequence - it is dropped with the column
-	Ownedby string
-	Comment string
-}
-
-// Matview is a materialized view - its query, indexes and comment
-type Matview struct {
-	Name    string
-	Columns []string
-	Sql     string
-	// Data is false to create it with no data - it is empty until refreshed
-	Data    *bool
-	Indexes []Index
-	Comment string
-}
-
-// MatviewShadowPrefix names the view that stands in for a materialized view's query in a shadow build - see ShadowDdl
-const MatviewShadowPrefix = "skima_matview_"
-
-type Hook struct {
-	Sql    []string
-	Script string
-}
-
-type PrePostHook struct {
-	Pre  Hook
-	Post Hook
-}
-
-type FkDelta struct {
-	Object     string
-	Action     string
-	Tablename  string
-	Definition ForeignKey `json:"def"`
-	PrePostHook
-}
-
-type SimpleDelta struct {
-	Object    string
-	Action    string
-	Name      string
-	Reference string
-	NewName   string
-	// On is what a comment delta comments on: table, column, view, enum, sequence or matview
-	On string
-	// Value is the value an enum alter delta adds
-	Value string
-	// Concurrently refreshes a materialized view without locking out reads
-	Concurrently bool
-	PrePostHook
-}
-
-type ColumnDelta struct {
-	Object     string
-	Action     string
-	Name       string
-	Definition Column `json:"def"`
-	Reference  string
-	Mods       ColumnAlterAttributes `json:"mods"`
-	PrePostHook
-}
-
-type SqlDelta struct {
-	Object      string
-	Description string
-	Script      string
-	Sql         []string
-	Bypass      []string
-}
-
-type ColumnAlterAttributes struct {
-	Datatype bool
-	Nullable bool
-	Default  bool
-}
-
-type ChangeSet struct {
-	Version      string
-	Description  string
-	Deltas       []interface{}
-	ParsedDeltas []Delta
-	Filename     string
-	SemVer       util.SemanticVersion
-	// Transaction is false when the changeset contains statements that cannot run in a transaction (e.g. create index
-	// concurrently). It defaults to true when not set
-	Transaction *bool
-}
-
-// InTransaction reports whether the changeset should be applied in a single transaction
-func (cs ChangeSet) InTransaction() bool {
-	return cs.Transaction == nil || *cs.Transaction
-}
-
-func check(e error, msg string) {
-	if e != nil {
-		fmt.Fprintln(os.Stderr, msg)
-		panic(e)
-	}
-}
-
-// ParseChangeSet takes a file path to a ChangeSet file and
-// parses out the ChangeSet information including parsing the
-// Deltas that are part of the ChangeSet
-// An error is returned if there are any issues parsing the file
-func ParseChangeSet(path string) (ChangeSet, error) {
-	activeChangeSet := ChangeSet{}
-	namePart := filepath.Base(path)
-	csBytes, err := reader.readFile(path)
-	var data []byte
-	if err == nil {
-		err = json.Unmarshal(csBytes, &activeChangeSet)
-		activeChangeSet.Version = util.ExtractVersion(namePart).String()
-		activeChangeSet.SemVer = util.ExtractVersion(activeChangeSet.Version)
-		activeChangeSet.ParsedDeltas = make([]Delta, len(activeChangeSet.Deltas))
-		activeChangeSet.Filename = filepath.Base(path)
-		for idx, delta := range activeChangeSet.Deltas {
-			// validation normally catches these, but it can be skipped (--skip-validation)
-			fields, ok := delta.(map[string]interface{})
-			if !ok {
-				return activeChangeSet, fmt.Errorf("delta %d of %s is not a JSON object", idx+1, namePart)
-			}
-			objType, ok := fields["object"].(string)
-			if !ok {
-				return activeChangeSet, fmt.Errorf("delta %d of %s has no \"object\" - it must be a string such as table, column or script", idx+1, namePart)
-			}
-			var simple bool
-			// script deltas are always SqlDeltas - one that points at a script file has none of the other markers
-			if objType != "script" && fields["def"] == nil && fields["mods"] == nil && fields["sql"] == nil {
-				simple = true
-			}
-			if simple {
-				data, err = json.Marshal(delta)
-				if err == nil {
-					chg := SimpleDelta{}
-					err = json.Unmarshal(data, &chg)
-					if err == nil {
-						activeChangeSet.ParsedDeltas[idx] = chg
-					}
-				}
-				if err != nil {
-					fmt.Fprintln(os.Stderr, "Unable to marshal/unmarshal the delta json", err)
-					return activeChangeSet, err
-				}
-			} else {
-				// this is the ugly stuff - marshal and unmarshal
-				data, err = json.Marshal(delta)
-				if err == nil {
-					switch objType {
-					case "fk":
-						fkd := FkDelta{}
-						err = json.Unmarshal(data, &fkd)
-						if err == nil {
-							activeChangeSet.ParsedDeltas[idx] = fkd
-						}
-					case "column":
-						cd := ColumnDelta{}
-						err = json.Unmarshal(data, &cd)
-						if err == nil {
-							activeChangeSet.ParsedDeltas[idx] = cd
-						}
-					default:
-						sd := SqlDelta{}
-						err = json.Unmarshal(data, &sd)
-						if err == nil {
-							activeChangeSet.ParsedDeltas[idx] = sd
-						}
-					}
-				}
-				if err != nil {
-					fmt.Fprintln(os.Stderr, "Unable to marshal/unmarshal the delta json", err)
-					return activeChangeSet, err
-				}
-			}
-		}
-	}
-	return activeChangeSet, err
-}
-
-// Version returns a SemanticVersion for the manifest based on
-// the delta files in the manifest
-func Version() util.SemanticVersion {
-	deltaFilePaths, _ := ListFiles(filepath.Join(viper.GetString("workdir"), "deltas"), "json")
-	if len(deltaFilePaths) == 0 {
-		return util.ExtractVersion("1.0.0")
-	}
-	// the manifest version is the highest changeset version, whatever its value
-	ver := util.ExtractVersion(filepath.Base(deltaFilePaths[0]))
-	for _, path := range deltaFilePaths[1:] {
-		if fileVer := util.ExtractVersion(filepath.Base(path)); fileVer.Compare(ver) > 0 {
-			ver = fileVer
-		}
-	}
-	return ver
-}
-
-func ParseTableByName(name string) (Table, error) {
-	switch name {
-	case "skima_schema_history":
-		return parseTable(SkimaSchemaHistoryTable)
-	case "skima_schema_statements":
-		return parseTable(SkimaSchemaStatementsTable)
-	default:
-		path := filepath.Join(viper.GetString("workdir"), "state", fmt.Sprintf("%s-table.json", name))
-		return ParseTableByPath(path)
-	}
-}
-
-func ParseTableByPath(path string) (Table, error) {
-	entityBytes, err := reader.readFile(path)
-	if err == nil {
-		return parseTable(entityBytes)
-	}
-	return Table{}, err
-}
-
-func ParseEnumByName(name string) (Enum, error) {
-	path := filepath.Join(viper.GetString("workdir"), "state", fmt.Sprintf("%s-enum.json", name))
-	return ParseEnumByPath(path)
-}
-
-func ParseEnumByPath(path string) (Enum, error) {
-	entityBytes, err := reader.readFile(path)
-	if err != nil {
-		return Enum{}, err
-	}
-	enum := Enum{}
-	err = json.Unmarshal(entityBytes, &enum)
-	return enum, err
-}
 
 // GenerateDdl creates the enum type with its values
 func (e Enum) GenerateDdl() string {
@@ -397,21 +43,6 @@ func (e Enum) AddValueDdl(value string) (string, bool) {
 		ddl += " before " + QuoteLiteral(e.Values[1])
 	}
 	return ddl, true
-}
-
-func ParseSequenceByName(name string) (Sequence, error) {
-	path := filepath.Join(viper.GetString("workdir"), "state", fmt.Sprintf("%s-sequence.json", name))
-	return ParseSequenceByPath(path)
-}
-
-func ParseSequenceByPath(path string) (Sequence, error) {
-	entityBytes, err := reader.readFile(path)
-	if err != nil {
-		return Sequence{}, err
-	}
-	seq := Sequence{}
-	err = json.Unmarshal(entityBytes, &seq)
-	return seq, err
 }
 
 // GenerateDdl creates the sequence with the settings it defines - its owner is set separately, once the owning table
@@ -481,21 +112,6 @@ func (s Sequence) AlterDdl() string {
 	return bld.String()
 }
 
-func ParseMatviewByName(name string) (Matview, error) {
-	path := filepath.Join(viper.GetString("workdir"), "state", fmt.Sprintf("%s-matview.json", name))
-	return ParseMatviewByPath(path)
-}
-
-func ParseMatviewByPath(path string) (Matview, error) {
-	entityBytes, err := reader.readFile(path)
-	if err != nil {
-		return Matview{}, err
-	}
-	mv := Matview{}
-	err = json.Unmarshal(entityBytes, &mv)
-	return mv, err
-}
-
 // GenerateDdl creates the materialized view, populated unless data is false - its indexes are created separately
 func (m Matview) GenerateDdl() string {
 	data := "with data"
@@ -517,59 +133,7 @@ func (m Matview) ShadowDdl() []string {
 	}
 }
 
-// UniqueIndex reports whether the materialized view has a unique index on columns, with no where clause - which a
-// refresh concurrently needs. An index defined by its ddl is not checked, so it counts
-func (m Matview) UniqueIndex() bool {
-	for _, idx := range m.Indexes {
-		if idx.Ddl != "" || idx.Unique {
-			return true
-		}
-	}
-	return false
-}
-
-func ParseViewByName(name string) (View, error) {
-	path := filepath.Join(viper.GetString("workdir"), "state", fmt.Sprintf("%s-view.json", name))
-	return ParseViewByPath(path)
-}
-
-func ParseViewByPath(path string) (View, error) {
-	entityBytes, err := reader.readFile(path)
-	if err == nil {
-		return parseView(entityBytes)
-	}
-	return View{}, err
-}
-
-func parseTable(raw []byte) (Table, error) {
-	table := Table{}
-	err := json.Unmarshal(raw, &table)
-	return table, err
-}
-
-func parseView(raw []byte) (View, error) {
-	view := View{}
-	err := json.Unmarshal(raw, &view)
-	return view, err
-}
-
-// ListFiles returns a list of files from a given path with a provided suffix
-func ListFiles(path string, sfx string) ([]string, error) {
-	files := make([]string, 0)
-	c, err := reader.readDir(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return files, nil // a missing directory (e.g. no deltas yet) has no files - other errors are returned
-	}
-	if err == nil {
-		for _, entry := range c {
-			if filepath.Ext(entry.Name()) == fmt.Sprintf(".%s", sfx) {
-				files = append(files, filepath.Join(path, entry.Name()))
-			}
-		}
-	}
-	return files, err
-}
-
+// GenerateDdl creates (or replaces) the view
 func (v View) GenerateDdl() string {
 	var bld strings.Builder
 	bld.WriteString("create or replace view ")
@@ -578,6 +142,7 @@ func (v View) GenerateDdl() string {
 	return bld.String()
 }
 
+// AlterStmt adds the column to the table (action add) or drops it (drop)
 func (col Column) AlterStmt(tablename string, action string) string {
 	switch action {
 	case "add":
@@ -610,6 +175,7 @@ func (col Column) defaultBuilder() string {
 	return ""
 }
 
+// AlterStmt adds the foreign key to the table (action add) or drops it (drop)
 func (fk ForeignKey) AlterStmt(tableName string, action string) string {
 	var bld strings.Builder
 	fmt.Fprintf(&bld, fkddlTmpl, QuoteIdent(tableName), action, QuoteIdent(fk.Name), quoteList(fk.Columns, ", "), QuoteIdent(fk.Reference.Table), quoteList(fk.Reference.Columns, ", "))
@@ -624,6 +190,7 @@ func (fk ForeignKey) AlterStmt(tableName string, action string) string {
 	return bld.String()
 }
 
+// GenerateDdl creates the index on the table - its ddl when it has one
 func (idx Index) GenerateDdl(tableName string) string {
 	if len(idx.Ddl) == 0 {
 		var unique string
@@ -635,6 +202,7 @@ func (idx Index) GenerateDdl(tableName string) string {
 	return idx.Ddl
 }
 
+// GenerateDdl adds the constraint to the table
 func (cons Constraint) GenerateDdl(tableName string) string {
 	var bld strings.Builder
 	fmt.Fprintf(&bld, "alter table %s add constraint %s ", QuoteIdent(tableName), QuoteIdent(cons.Name))
@@ -647,25 +215,19 @@ func (cons Constraint) GenerateDdl(tableName string) string {
 	return bld.String()
 }
 
-func (fk FkDelta) GenerateDdl() string {
-	return fk.Definition.AlterStmt(fk.Tablename, fk.Action)
+// Ddl generates the foreign key delta's statement from its own definition
+func (fk FkDelta) Ddl() (string, error) {
+	return fk.Definition.AlterStmt(fk.Tablename, fk.Action), nil
 }
 
+// StatementType is how the delta is recorded in the history, e.g. "delta add fk"
 func (fk FkDelta) StatementType() string {
 	return fmt.Sprintf("delta %s %s", fk.Action, fk.Object)
 }
 
+// Describe names what the delta changes, e.g. "add documents.documents_project_fk"
 func (fk FkDelta) Describe() string {
 	return fmt.Sprintf("%s %s.%s", fk.Action, fk.Tablename, fk.Definition.Name)
-}
-
-func (col ColumnDelta) GenerateDdl() string {
-	ddl, err := col.Ddl()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ALTER COLUMN datatype failure due to not being able to parse table reference: %s", err)
-		return ""
-	}
-	return ddl
 }
 
 // Ddl generates the delta's statement, returning an error if the reference table's state file cannot be read
@@ -706,43 +268,17 @@ func (col ColumnDelta) Ddl() (string, error) {
 	return builder.String(), nil
 }
 
+// StatementType is how the delta is recorded in the history, e.g. "delta alter column"
 func (col ColumnDelta) StatementType() string {
 	return fmt.Sprintf("delta %s %s", col.Action, col.Object)
 }
 
+// Describe names what the delta changes, e.g. "alter documents.priority"
 func (col ColumnDelta) Describe() string {
 	return fmt.Sprintf("%s %s.%s", col.Action, col.Reference, col.Name)
 }
 
-func (sd SimpleDelta) Table() Table {
-	var tbl Table
-	var err error
-	if sd.Object == "table" && sd.Action == "add" {
-		tbl, err = ParseTableByName(sd.Name)
-		check(err, fmt.Sprintf("Unable to parse the table %s", sd.Name))
-	}
-	return tbl
-}
-
-func (sd SimpleDelta) GenerateDdl() string {
-	ddl, err := sd.Ddl()
-	var missing *MissingDefinitionError
-	if errors.As(err, &missing) {
-		fmt.Fprintln(os.Stderr, missing)
-		return ""
-	}
-	if err != nil {
-		check(err, err.Error())
-	}
-	return ddl
-}
-
-// MissingDefinitionError reports a delta whose definition is not in the state files, so it generates no DDL - the
-// apply skips such a delta rather than failing
-type MissingDefinitionError struct {
-	msg string
-}
-
+// Error describes the missing definition
 func (e *MissingDefinitionError) Error() string {
 	return e.msg
 }
@@ -828,7 +364,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 					return "", err
 				}
 				if len(t.PrimaryKey) == 0 {
-					fmt.Fprintf(os.Stderr, "Table %s did not have a primary key definition\n", sd.Reference)
+					return "", missingDefinition("Table %s did not have a primary key definition", sd.Reference)
 				}
 				return fmt.Sprintf("alter table %s add constraint %s primary key (%s)", QuoteIdent(sd.Reference), QuoteIdent(sd.Name), quoteList(t.PrimaryKey, ", ")), nil
 			}
@@ -1023,16 +559,6 @@ func (sd SimpleDelta) stateComment() (string, error) {
 	return comment, nil
 }
 
-// Column returns the table's column with the name
-func (t Table) Column(name string) (Column, bool) {
-	for _, col := range t.Columns {
-		if col.Name == name {
-			return col, true
-		}
-	}
-	return Column{}, false
-}
-
 // CommentDdl sets the comment on a table, column (target is table.column), view, enum, sequence or matview - an empty
 // comment removes it. The target's names are quoted where they need it.
 // The comment is quoted as a string literal
@@ -1056,51 +582,12 @@ func QuoteLiteral(text string) string {
 	return "'" + strings.ReplaceAll(text, "'", "''") + "'"
 }
 
-// referenceIndexes returns the indexes of the reference table - or materialized view, when it has a state file instead
-func (sd SimpleDelta) referenceIndexes() ([]Index, error) {
-	t, err := sd.referenceTable()
-	if err == nil {
-		return t.Indexes, nil
-	}
-	if mv, mvErr := ParseMatviewByName(sd.Reference); mvErr == nil {
-		return mv.Indexes, nil
-	}
-	return nil, err
-}
-
-func (sd SimpleDelta) referenceTable() (Table, error) {
-	t, err := ParseTableByName(sd.Reference)
-	if err != nil {
-		return t, fmt.Errorf("unable to parse the reference table %s: %w", sd.Reference, err)
-	}
-	return t, nil
-}
-
-// FunctionFile returns the sql file a function add delta runs - the first of FunctionFilePaths that exists. When none
-// can be read it returns the error reading the last of them
-func (sd SimpleDelta) FunctionFile() (string, error) {
-	var err error
-	for _, path := range FunctionFilePaths(viper.GetString("workdir"), sd.Name) {
-		if _, err = reader.readFile(path); err == nil {
-			return path, nil
-		}
-	}
-	return "", fmt.Errorf("unable to open the sql file for %s - expected %s: %w", sd.Name, strings.Join(FunctionFilePaths("", sd.Name), " or "), err)
-}
-
-// FunctionFilePaths returns where a function delta's sql file can be, in lookup order: state/sql/pre (where the state
-// build also runs it) and then state/sql, where function files were originally read from
-func FunctionFilePaths(workdir string, name string) []string {
-	return []string{
-		filepath.Join(workdir, "state", "sql", "pre", name+".sql"),
-		filepath.Join(workdir, "state", "sql", name+".sql"),
-	}
-}
-
+// StatementType is how the delta is recorded in the history, e.g. "delta add index"
 func (sd SimpleDelta) StatementType() string {
 	return fmt.Sprintf("delta %s %s", sd.Action, sd.Object)
 }
 
+// Describe names what the delta changes, e.g. "add documents.documents_type_idx"
 func (sd SimpleDelta) Describe() string {
 	var bld strings.Builder
 	bld.WriteString(sd.Action)
@@ -1124,90 +611,30 @@ func (sd SimpleDelta) Describe() string {
 	return bld.String()
 }
 
+// Describe is the delta's description
 func (sd SqlDelta) Describe() string {
 	return sd.Description
 }
 
+// StatementType is how the delta is recorded in the history
 func (sd SqlDelta) StatementType() string {
 	return "Standalone SQL delta"
 }
 
-func (sd SqlDelta) GenerateDdl() string {
+// Ddl returns the script delta's first statement, or its script file's contents - plan uses Statements for every
+// statement
+func (sd SqlDelta) Ddl() (string, error) {
 	if len(sd.Script) > 0 {
-		dat, err := reader.readFile(filepath.Join(viper.GetString("workdir"), "deltas", "scripts", sd.Script))
-		if err == nil {
-			return string(dat)
-		} else {
-			fmt.Fprintln(os.Stderr, "Unable to read the delta script file", sd.Script)
-			return ""
-		}
+		return readScript(sd.Script)
 	}
-	return sd.Sql[0]
+	if len(sd.Sql) == 0 {
+		return "", missingDefinition("the script delta %q has no sql or script", sd.Description)
+	}
+	return sd.Sql[0], nil
 }
 
-// ScriptPath returns where a script delta or hook's sql file is - in the deltas/scripts directory
-func ScriptPath(workdir string, script string) string {
-	return filepath.Join(workdir, "deltas", "scripts", script)
-}
-
-// readScript reads a script file, returning an error if it is missing or empty - applying it would fail
-func readScript(script string) (string, error) {
-	dat, err := reader.readFile(ScriptPath(viper.GetString("workdir"), script))
-	if err != nil {
-		return "", fmt.Errorf("unable to read the script %s: %w", script, err)
-	}
-	if len(dat) == 0 {
-		return "", fmt.Errorf("the script %s is empty", script)
-	}
-	return string(dat), nil
-}
-
-// Statements returns every statement the delta runs - its sql, or the contents of its script file as one statement
-func (sd SqlDelta) Statements() ([]string, error) {
-	if len(sd.Script) > 0 {
-		script, err := readScript(sd.Script)
-		if err != nil {
-			return nil, err
-		}
-		return []string{script}, nil
-	}
-	return sd.Sql, nil
-}
-
-// Statements returns the hook's sql, or the contents of its script file as one statement when it has no sql
-func (hook Hook) Statements() ([]string, error) {
-	if len(hook.Sql) > 0 {
-		return hook.Sql, nil
-	}
-	if len(hook.Script) > 0 {
-		script, err := readScript(hook.Script)
-		if err != nil {
-			return nil, err
-		}
-		return []string{script}, nil
-	}
-	return nil, nil
-}
-
-// Hooks returns the pre/post hooks - promoted to every delta type that embeds PrePostHook
-func (hook PrePostHook) Hooks() PrePostHook {
-	return hook
-}
-
-func (hook PrePostHook) HasPreHook() bool {
-	if len(hook.Pre.Script) > 0 || len(hook.Pre.Sql) > 0 {
-		return true
-	}
-	return false
-}
-
-func (hook PrePostHook) HasPostHook() bool {
-	if len(hook.Post.Script) > 0 || len(hook.Post.Sql) > 0 {
-		return true
-	}
-	return false
-}
-
+// GenerateDdl creates the table with its columns and primary key - its foreign keys, indexes, constraints and
+// triggers are created separately
 func (t Table) GenerateDdl() string {
 	var bld strings.Builder
 	ignorePk := false
@@ -1236,6 +663,7 @@ func (t Table) GenerateDdl() string {
 	return bld.String()
 }
 
+// GenerateFkDdl adds the table's foreign keys - once every table exists
 func (t Table) GenerateFkDdl() []string {
 	fks := make([]string, 0)
 	for _, fk := range t.ForeignKeys {

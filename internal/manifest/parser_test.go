@@ -174,7 +174,7 @@ func TestFkDelta_GenerateDdl(t *testing.T) {
 	expected := "alter table child_table add constraint testing_fk foreign key (parent_id) references parent_table (id) on delete cascade"
 	fk := ForeignKey{Name: "testing_fk", Columns: []string{"parent_id"}, DeleteRule: "cascade", Reference: PrimaryKeyRef{"parent_table", []string{"id"}}}
 	delta := FkDelta{Object: "fk", Tablename: "child_table", Action: "add", Definition: fk}
-	fkDdl := delta.GenerateDdl()
+	fkDdl := mustDdl(t, delta)
 	if fkDdl != expected {
 		t.Errorf("Generated FK is not valid:\n EXPECTED: %s\n ACTUAL: %s\n", expected, fkDdl)
 	}
@@ -239,7 +239,7 @@ func TestSimpleDelta_GenerateDdlDrop(t *testing.T) {
 
 func testSimpleDelta_GenerateDdlFunc(sd SimpleDelta, expected string) func(t *testing.T) {
 	return func(t *testing.T) {
-		actual := sd.GenerateDdl()
+		actual := mustDdl(t, sd)
 		if actual != expected {
 			t.Errorf("Error generating Drop statement: EXPECTED: %s  ACTUAL: %s", expected, actual)
 		}
@@ -259,7 +259,7 @@ func TestColumnDelta_GenerateDdl(t *testing.T) {
 
 func testColumnDelta_GenerateDdlFunc(delta ColumnDelta, expected string) func(t *testing.T) {
 	return func(t *testing.T) {
-		actual := delta.GenerateDdl()
+		actual := mustDdl(t, delta)
 		if actual != expected {
 			t.Errorf("Error generating ddl for the ColumnDelta: EXPECTED: %s  ACTUAL: %s", expected, actual)
 		}
@@ -359,8 +359,8 @@ func TestScriptDelta(t *testing.T) {
 		t.Errorf("Error parsing DeltaJSON: %s", err)
 	}
 
-	if sqlDelta.GenerateDdl() != masterScript {
-		t.Errorf("SqlDelta.GenerateDdl failure - EXPECTED: %s  ACTUAL: %s", masterScript, sqlDelta.GenerateDdl())
+	if ddl := mustDdl(t, sqlDelta); ddl != masterScript {
+		t.Errorf("SqlDelta.Ddl failure - EXPECTED: %s  ACTUAL: %s", masterScript, ddl)
 	}
 }
 
@@ -506,4 +506,14 @@ func TestDefaultStringLiteral(t *testing.T) {
 			t.Errorf("%+v - EXPECTED %q  ACTUAL: %q", tc.col, tc.want, got)
 		}
 	}
+}
+
+// mustDdl generates the delta's statement, failing the test on an error
+func mustDdl(t *testing.T, delta Delta) string {
+	t.Helper()
+	ddl, err := delta.Ddl()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ddl
 }

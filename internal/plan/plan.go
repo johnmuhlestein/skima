@@ -386,7 +386,8 @@ func changesetUnit(path string) (Unit, []string, error) {
 			}
 			unit.Steps = append(unit.Steps, step)
 		default:
-			step, err := deltaStep(delta, delta.GenerateDdl(), nil, source, position)
+			ddl, err := delta.Ddl()
+			step, err := deltaStep(delta, ddl, err, source, position)
 			if err != nil {
 				return fail(err)
 			}

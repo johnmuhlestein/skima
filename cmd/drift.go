@@ -61,7 +61,7 @@ Example:
 	Args: cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
 		report := drift.Report{Schema: viper.GetString("dbconn.schema")}
-		hist, err := db.GetApplyHistory()
+		hist, err := db.GetApplyHistory(cmd.Context())
 		switch err {
 		case nil:
 			report.Deployed = hist.SchemaVersion.String()
@@ -81,7 +81,7 @@ Example:
 			fmt.Fprintln(os.Stderr, "ERROR: unable to read the state files:", err)
 			os.Exit(1)
 		}
-		actual, expected, err := db.ReadSchemas(p.Units[0].WithoutPostSql())
+		actual, expected, err := db.ReadSchemas(cmd.Context(), p.Units[0].WithoutPostSql())
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ERROR:", err)
 			os.Exit(1)

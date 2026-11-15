@@ -18,10 +18,18 @@ import (
 type fakeExecer struct {
 	errs     map[string][]error
 	executed []string
+	// onExec, when set, runs before each statement - e.g. to cancel the run part way through
+	onExec func(sql string)
 }
 
 func (f *fakeExecer) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
 	f.executed = append(f.executed, sql)
+	if f.onExec != nil {
+		f.onExec(sql)
+	}
+	if err := ctx.Err(); err != nil {
+		return pgconn.CommandTag{}, err
+	}
 	if queued := f.errs[sql]; len(queued) > 0 {
 		f.errs[sql] = queued[1:]
 		return pgconn.CommandTag{}, queued[0]
@@ -38,7 +46,7 @@ type fakeHistory struct {
 	rows []row
 }
 
-func (h *fakeHistory) record(history *ApplyHistory, stmtType string, status string, desc string) (int, error) {
+func (h *fakeHistory) record(ctx context.Context, history *ApplyHistory, stmtType string, status string, desc string) (int, error) {
 	h.rows = append(h.rows, row{stmtType, status, desc})
 	if status == "failed" {
 		history.Status = "failed" // as recordStatementHist does
@@ -65,7 +73,7 @@ func execute(steps []plan.Step, errs map[string][]error) (failures int, ex *fake
 	ex = &fakeExecer{errs: errs}
 	hist = &fakeHistory{}
 	history = &ApplyHistory{Status: "started"}
-	failures = executor{ex: ex, record: hist.record, history: history, out: io.Discard, errOut: io.Discard}.run(steps)
+	failures = executor{ctx: context.Background(), ex: ex, record: hist.record, history: history, out: io.Discard, errOut: io.Discard}.run(steps)
 	return failures, ex, hist, history
 }
 
@@ -228,7 +236,7 @@ func TestShadowStatements(t *testing.T) {
 	for _, shadow := range []bool{false, true} {
 		ex := &fakeExecer{errs: map[string][]error{}}
 		hist := &fakeHistory{}
-		e := executor{ex: ex, record: hist.record, history: &ApplyHistory{}, out: io.Discard, errOut: io.Discard, shadow: shadow}
+		e := executor{ctx: context.Background(), ex: ex, record: hist.record, history: &ApplyHistory{}, out: io.Discard, errOut: io.Discard, shadow: shadow}
 		if failures := e.run([]plan.Step{step, plain}); failures != 0 {
 			t.Fatalf("shadow %v: %d failures", shadow, failures)
 		}
@@ -276,5 +284,28 @@ func TestPlanHistoryRows(t *testing.T) {
 	}
 	if successes != p.Statements() {
 		t.Errorf("EXPECTED a success row per planned statement (%d)  ACTUAL: %d", p.Statements(), successes)
+	}
+}
+
+// cancelling the context (Ctrl+C) stops the run at the statement it is running - nothing after it runs, and the run is
+// marked cancelled
+func TestCancelledRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ex := &fakeExecer{errs: map[string][]error{}, onExec: func(sql string) {
+		if sql == "second" {
+			cancel()
+		}
+	}}
+	hist := &fakeHistory{}
+	history := &ApplyHistory{Status: "started"}
+	steps := []plan.Step{viewStep("first"), viewStep("second"), viewStep("third")}
+	steps[1].Retryable = false
+	failures := executor{ctx: ctx, ex: ex, record: hist.record, history: history, out: io.Discard, errOut: io.Discard}.run(steps)
+	if failures == 0 || history.Status != "cancelled" || strings.Join(ex.executed, ",") != "first,second" {
+		t.Errorf("EXPECTED the run stopped at the second step and marked cancelled  ACTUAL: %d failures, %s, executed %v", failures, history.Status, ex.executed)
+	}
+	if hist.count("success") != 1 || hist.count("failed") != 1 {
+		t.Errorf("EXPECTED the first step's success and the interrupted step recorded  ACTUAL: %v", hist.rows)
 	}
 }
