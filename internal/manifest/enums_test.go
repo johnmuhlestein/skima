@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/johnmuhlestein/skima/internal/util"
-	"github.com/spf13/viper"
 )
 
 func TestEnumDdl(t *testing.T) {
@@ -37,10 +36,9 @@ func TestEnumDdl(t *testing.T) {
 
 func TestEnumDelta(t *testing.T) {
 	reader = osReadWrapper{}
-	viper.Set("workdir", writeManifest(t, map[string]string{
+	workdir := writeManifest(t, map[string]string{
 		"state/doc_status-enum.json": `{"name":"doc_status","values":["draft","published","archived"],"comment":"Lifecycle"}`,
-	}))
-	t.Cleanup(func() { viper.Set("workdir", "") })
+	})
 	cases := []struct {
 		delta    SimpleDelta
 		expected string
@@ -53,13 +51,13 @@ func TestEnumDelta(t *testing.T) {
 		{SimpleDelta{Object: "comment", Action: "add", On: "enum", Name: "doc_status"}, "comment on type doc_status is 'Lifecycle'", false},
 	}
 	for _, c := range cases {
-		ddl, err := c.delta.Ddl()
+		ddl, err := c.delta.Ddl(workdir)
 		var missing *MissingDefinitionError
 		if ddl != c.expected || errors.As(err, &missing) != c.missing {
 			t.Errorf("%s: EXPECTED %q (missing definition %v)  ACTUAL: %q, %v", c.delta.Describe(), c.expected, c.missing, ddl, err)
 		}
 	}
-	if _, err := (SimpleDelta{Object: "enum", Action: "add", Name: "absent"}).Ddl(); err == nil {
+	if _, err := (SimpleDelta{Object: "enum", Action: "add", Name: "absent"}).Ddl(workdir); err == nil {
 		t.Error("EXPECTED an error for an enum without a state file")
 	}
 	if d := (SimpleDelta{Object: "enum", Action: "alter", Name: "doc_status", Value: "archived"}); d.Describe() != "alter doc_status (add value 'archived')" {
@@ -87,8 +85,6 @@ func TestEnumValidation(t *testing.T) {
 			{"object":"enum","action":"rename","name":"doc_status"}
 		]}`,
 	})
-	viper.Set("workdir", workdir)
-	t.Cleanup(func() { viper.Set("workdir", "") })
 	since := util.ExtractVersion("1.0.0")
 	results, err := ValidateManifest(workdir, &since)
 	if err != nil {

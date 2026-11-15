@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/johnmuhlestein/skima/internal/util"
-	"github.com/spf13/viper"
 )
 
 func TestCommentDdl(t *testing.T) {
@@ -30,12 +29,11 @@ const commentedDocs = `{"name":"docs","comment":"Uploaded documents","columns":[
 
 func TestCommentDelta(t *testing.T) {
 	reader = osReadWrapper{}
-	viper.Set("workdir", writeManifest(t, map[string]string{
+	workdir := writeManifest(t, map[string]string{
 		"state/docs-table.json":   commentedDocs,
 		"state/summary-view.json": `{"name":"summary","columns":["n"],"sql":"select count(*) from docs","comment":"How many"}`,
 		"state/plain-view.json":   `{"name":"plain","columns":["n"],"sql":"select 1"}`,
-	}))
-	t.Cleanup(func() { viper.Set("workdir", "") })
+	})
 
 	cases := []struct {
 		delta    SimpleDelta
@@ -52,7 +50,7 @@ func TestCommentDelta(t *testing.T) {
 		{SimpleDelta{Object: "comment", Action: "add", On: "column", Name: "nope", Reference: "docs"}, "", true},
 	}
 	for _, c := range cases {
-		ddl, err := c.delta.Ddl()
+		ddl, err := c.delta.Ddl(workdir)
 		var missing *MissingDefinitionError
 		if ddl != c.expected || errors.As(err, &missing) != c.missing {
 			t.Errorf("%s: EXPECTED %q (missing definition %v)  ACTUAL: %q, %v", c.delta.Describe(), c.expected, c.missing, ddl, err)
@@ -82,8 +80,6 @@ func TestCommentDeltaValidation(t *testing.T) {
 			{"object":"comment","action":"set","on":"index","name":"docs_idx"}
 		]}`,
 	})
-	viper.Set("workdir", workdir)
-	t.Cleanup(func() { viper.Set("workdir", "") })
 	since := util.ExtractVersion("1.0.0")
 	results, err := ValidateManifest(workdir, &since)
 	if err != nil {

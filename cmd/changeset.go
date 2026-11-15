@@ -89,7 +89,12 @@ Example:
 			statements, planErr := changes.PreviewSql(workdir, result.Deltas)
 			var verified *verify.Report
 			if verifyChanges && len(result.Deltas) > 0 {
-				report, err := verify.Deltas(cmd.Context(), workdir, baseline, result.Deltas)
+				database, err := openDB()
+				if err != nil {
+					return err
+				}
+				defer database.Close()
+				report, err := verify.Deltas(cmd.Context(), database, workdir, baseline, result.Deltas)
 				if err != nil {
 					return fmt.Errorf("unable to verify the changeset: %w", err)
 				}
@@ -165,7 +170,12 @@ Example:
 			if err != nil {
 				return err
 			}
-			report, err := verify.File(cmd.Context(), workdir, baseline, path)
+			database, err := openDB()
+			if err != nil {
+				return err
+			}
+			defer database.Close()
+			report, err := verify.File(cmd.Context(), database, workdir, baseline, path)
 			var invalid *changes.InvalidChangesetError
 			switch {
 			case errors.As(err, &invalid):

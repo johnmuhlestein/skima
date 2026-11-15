@@ -14,7 +14,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -23,7 +22,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/johnmuhlestein/skima/internal/manifest"
 	"github.com/johnmuhlestein/skima/internal/util"
-	"github.com/spf13/viper"
 )
 
 const histInsert = "insert into skima_schema_history (schema_version, apply_type, status, delta_file) values ($1,$2,$3,$4) returning run_id"
@@ -46,9 +44,6 @@ const bootstrapSearchPath = "alter role %s set search_path to %s"
 const histTableName = "skima_schema_history"
 
 var histApplyTypes = util.FromSlice([]string{"state", "baseline", "delta", "changeset", "sql"})
-var once sync.Once
-var instance *pgxpool.Pool
-var poolErr error
 
 // ErrNoHistTable is returned when the schema has no history tables - it is not managed by skima yet
 var ErrNoHistTable = errors.New("history tables have not been provisioned")
@@ -78,30 +73,53 @@ type ApplyStatement struct {
 	Description   string
 }
 
-// pool returns the connection pool for the configured database, created on first use. The pool connects lazily, so a
-// database that can't be reached is reported by the first query
-func pool() (*pgxpool.Pool, error) {
-	once.Do(func() {
-		poolConfig, err := pgxpool.ParseConfig(connString(viper.GetString("dbconn.username"), viper.GetString("dbconn.password")))
-		if err != nil {
-			poolErr = fmt.Errorf("invalid database connection settings: %w", err)
-			return
-		}
-		// set as a runtime param rather than a URL "options" query value, which newer pgx versions reject
-		poolConfig.ConnConfig.RuntimeParams["search_path"] = viper.GetString("dbconn.schema")
-		// identifies skima's sessions in pg_stat_activity, e.g. who holds the apply lock
-		poolConfig.ConnConfig.RuntimeParams["application_name"] = "skima"
-		// on Ctrl+C, ask the server to cancel the running statement instead of closing the connection - the
-		// connection survives, so the run's transaction is rolled back and its history recorded on it
-		poolConfig.ConnConfig.BuildContextWatcherHandler = func(conn *pgconn.PgConn) ctxwatch.Handler {
-			return &pgconn.CancelRequestContextWatcherHandler{Conn: conn, DeadlineDelay: 10 * time.Second}
-		}
-		instance, poolErr = pgxpool.NewWithConfig(context.Background(), poolConfig)
-		if poolErr != nil {
-			poolErr = fmt.Errorf("unable to connect to the database: %w", poolErr)
-		}
-	})
-	return instance, poolErr
+// Config is how to reach the database, and the schema skima manages in it
+type Config struct {
+	Host     string
+	Port     int
+	Database string
+	Schema   string
+	User     string
+	Password string
+}
+
+// DB is a connection pool to the database skima manages a schema in - its sessions' search path is the schema
+type DB struct {
+	pool *pgxpool.Pool
+	cfg  Config
+}
+
+// Open creates the connection pool. It connects lazily, so a database that can't be reached is reported by the first
+// query. Close it when done
+func Open(cfg Config) (*DB, error) {
+	poolConfig, err := pgxpool.ParseConfig(cfg.connString(cfg.User, cfg.Password))
+	if err != nil {
+		return nil, fmt.Errorf("invalid database connection settings: %w", err)
+	}
+	// set as a runtime param rather than a URL "options" query value, which newer pgx versions reject
+	poolConfig.ConnConfig.RuntimeParams["search_path"] = cfg.Schema
+	// identifies skima's sessions in pg_stat_activity, e.g. who holds the apply lock
+	poolConfig.ConnConfig.RuntimeParams["application_name"] = "skima"
+	// on Ctrl+C, ask the server to cancel the running statement instead of closing the connection - the
+	// connection survives, so the run's transaction is rolled back and its history recorded on it
+	poolConfig.ConnConfig.BuildContextWatcherHandler = func(conn *pgconn.PgConn) ctxwatch.Handler {
+		return &pgconn.CancelRequestContextWatcherHandler{Conn: conn, DeadlineDelay: 10 * time.Second}
+	}
+	pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
+	if err != nil {
+		return nil, fmt.Errorf("unable to connect to the database: %w", err)
+	}
+	return &DB{pool: pool, cfg: cfg}, nil
+}
+
+// Close closes the pool's connections - releasing an apply lock still held
+func (d *DB) Close() {
+	d.pool.Close()
+}
+
+// Schema is the schema skima manages
+func (d *DB) Schema() string {
+	return d.cfg.Schema
 }
 
 // role and schema names accepted by bootstrap - postgres' unquoted identifier rules, so the names behave the same whether
@@ -110,12 +128,12 @@ var identifierPattern = regexp.MustCompile(`^[a-z_][a-z0-9_$]{0,62}$`)
 
 // connString builds a connection URL for the configured host, port and database. The credentials are URL-escaped so
 // they may contain any characters
-func connString(user string, password string) string {
+func (c Config) connString(user string, password string) string {
 	connUrl := url.URL{
 		Scheme: "postgresql",
 		User:   url.UserPassword(user, password),
-		Host:   net.JoinHostPort(viper.GetString("dbconn.connstring"), strconv.Itoa(viper.GetInt("dbconn.port"))),
-		Path:   "/" + viper.GetString("dbconn.database"),
+		Host:   net.JoinHostPort(c.Host, strconv.Itoa(c.Port)),
+		Path:   "/" + c.Database,
 	}
 	return connUrl.String()
 }
@@ -173,12 +191,8 @@ func (se savepointExecer) Exec(ctx context.Context, sql string, arguments ...any
 	return tag, savepoint.Commit(ctx)
 }
 
-func acquireConn(ctx context.Context) (*pgxpool.Conn, error) {
-	p, err := pool()
-	if err != nil {
-		return nil, err
-	}
-	conn, err := p.Acquire(ctx)
+func (d *DB) acquireConn(ctx context.Context) (*pgxpool.Conn, error) {
+	conn, err := d.pool.Acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("unable to connect to the database: %w", err)
 	}
@@ -187,6 +201,7 @@ func acquireConn(ctx context.Context) (*pgxpool.Conn, error) {
 
 // run applies a changeset or state build on one connection - in a single transaction unless it opted out
 type run struct {
+	db      *DB
 	conn    *pgxpool.Conn
 	tx      pgx.Tx // nil when the run is applied without a transaction
 	ex      execer
@@ -198,12 +213,12 @@ type run struct {
 
 // beginRun acquires a connection and, when inTransaction is set, starts the run's transaction. optOut tells the user
 // how to apply the run without a transaction
-func beginRun(ctx context.Context, history *ApplyHistory, name string, inTransaction bool, optOut string, out, errOut io.Writer) (*run, error) {
-	conn, err := acquireConn(ctx)
+func (d *DB) beginRun(ctx context.Context, history *ApplyHistory, name string, inTransaction bool, optOut string, out, errOut io.Writer) (*run, error) {
+	conn, err := d.acquireConn(ctx)
 	if err != nil {
 		return nil, err
 	}
-	r := &run{conn: conn, ex: conn, history: history, name: name, out: out, errOut: errOut}
+	r := &run{db: d, conn: conn, ex: conn, history: history, name: name, out: out, errOut: errOut}
 	if !inTransaction {
 		fmt.Fprintf(out, "The %s is applied without a transaction - a failure part way through is not rolled back\n", name)
 		return r, nil
@@ -238,7 +253,7 @@ func (r *run) finish(ctx context.Context, failures int) int {
 		if err == nil {
 			return 0
 		}
-		stmtId, err2 := recordStatementHist(done, r.history, "Commit "+r.name, "failed", err.Error())
+		stmtId, err2 := r.db.recordStatementHist(done, r.history, "Commit "+r.name, "failed", err.Error())
 		fmt.Fprintf(r.errOut, "FAILURE: committing %s - Statement ID: %d\n %s\n", r.name, stmtId, err)
 		if err2 != nil {
 			fmt.Fprintf(r.errOut, "Unable to record the statement history for committing the %s: %s\n", r.name, err2)
@@ -252,7 +267,7 @@ func (r *run) finish(ctx context.Context, failures int) int {
 			fmt.Fprintf(r.errOut, "Unable to roll back the %s transaction: %s\n", r.name, err)
 		}
 	}
-	if err := markRolledBack(done, r.history); err != nil {
+	if err := r.db.markRolledBack(done, r.history); err != nil {
 		fmt.Fprintln(r.errOut, "Unable to mark the run's statements as rolled back:", err)
 	}
 	if ctx.Err() != nil {
@@ -263,9 +278,9 @@ func (r *run) finish(ctx context.Context, failures int) int {
 }
 
 // markRolledBack records that a run's changes were undone - statements recorded as successful did not persist
-func markRolledBack(ctx context.Context, history *ApplyHistory) error {
+func (d *DB) markRolledBack(ctx context.Context, history *ApplyHistory) error {
 	history.Status = "rolled back"
-	conn, err := acquireConn(ctx)
+	conn, err := d.acquireConn(ctx)
 	if err != nil {
 		return err
 	}
@@ -278,18 +293,18 @@ func markRolledBack(ctx context.Context, history *ApplyHistory) error {
 // deploy jobs would otherwise apply the same changesets concurrently. If another apply holds the lock, this waits up to
 // timeout for it to finish (0 waits indefinitely) and returns an error if it does not, or if ctx is cancelled. The lock
 // is held on a dedicated connection until unlock is called - or the process exits, which closes the connection.
-func LockApply(ctx context.Context, timeout time.Duration, out io.Writer) (unlock func(), err error) {
-	conn, err := acquireConn(ctx)
+func (d *DB) LockApply(ctx context.Context, timeout time.Duration, out io.Writer) (unlock func(), err error) {
+	conn, err := d.acquireConn(ctx)
 	if err != nil {
 		return nil, err
 	}
 	unlock = func() {
 		done, cancel := cleanup(ctx)
 		defer cancel()
-		_, _ = conn.Exec(done, "select pg_advisory_unlock(hashtext($1))", "skima apply "+viper.GetString("dbconn.schema"))
+		_, _ = conn.Exec(done, "select pg_advisory_unlock(hashtext($1))", "skima apply "+d.cfg.Schema)
 		conn.Release()
 	}
-	schema := viper.GetString("dbconn.schema")
+	schema := d.cfg.Schema
 	key := "skima apply " + schema
 	var locked bool
 	if err = conn.QueryRow(ctx, "select pg_try_advisory_lock(hashtext($1))", key).Scan(&locked); err != nil {
@@ -355,7 +370,7 @@ func lockHolder(ctx context.Context, conn *pgxpool.Conn, key string) string {
 // InitializeHistory creates a new history record in the database, which generates a runId and populates the basic
 // information. The filename parameter is optional, and passing in an empty string will leave the field blank in
 // the database
-func InitializeHistory(ctx context.Context, version util.SemanticVersion, applyType string, filename string) (ApplyHistory, error) {
+func (d *DB) InitializeHistory(ctx context.Context, version util.SemanticVersion, applyType string, filename string) (ApplyHistory, error) {
 	hist := ApplyHistory{SchemaVersion: version, ApplyType: applyType, Status: "started", VersionString: version.String(), FileName: filename}
 	if !histApplyTypes.Has(applyType) {
 		return hist, fmt.Errorf("invalid apply type for the history table: %s", applyType)
@@ -363,7 +378,7 @@ func InitializeHistory(ctx context.Context, version util.SemanticVersion, applyT
 	if applyType == "baseline" {
 		hist.Status = "complete"
 	}
-	conn, err := acquireConn(ctx)
+	conn, err := d.acquireConn(ctx)
 	if err != nil {
 		return hist, err
 	}
@@ -377,10 +392,10 @@ func InitializeHistory(ctx context.Context, version util.SemanticVersion, applyT
 
 // FinalizeHistory records the run's status and completion time. It runs even when ctx was cancelled - the history
 // must say how the run ended
-func FinalizeHistory(ctx context.Context, history *ApplyHistory) error {
+func (d *DB) FinalizeHistory(ctx context.Context, history *ApplyHistory) error {
 	done, cancel := cleanup(ctx)
 	defer cancel()
-	conn, err := acquireConn(done)
+	conn, err := d.acquireConn(done)
 	if err != nil {
 		return err
 	}
@@ -391,8 +406,8 @@ func FinalizeHistory(ctx context.Context, history *ApplyHistory) error {
 	return nil
 }
 
-func recordStatementHist(ctx context.Context, history *ApplyHistory, stmtType string, status string, desc string) (int, error) {
-	conn, err := acquireConn(ctx)
+func (d *DB) recordStatementHist(ctx context.Context, history *ApplyHistory, stmtType string, status string, desc string) (int, error) {
+	conn, err := d.acquireConn(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -413,10 +428,8 @@ func recordStatementHist(ctx context.Context, history *ApplyHistory, stmtType st
 // Bootstrap uses the superuser to create the application role and schema, grant the role privileges on the schema and
 // make the schema the role's search path. It is safe to re-run - an existing role keeps its password and the schema is
 // only created if it does not exist.
-func Bootstrap(ctx context.Context, su string, supwd string, out io.Writer) error {
-	username := viper.GetString("dbconn.username")
-	schema := viper.GetString("dbconn.schema")
-	password := viper.GetString("dbconn.password")
+func Bootstrap(ctx context.Context, cfg Config, su string, supwd string, out io.Writer) error {
+	username, schema, password := cfg.User, cfg.Schema, cfg.Password
 	if len(password) == 0 {
 		return errors.New("a password for the application user is required to bootstrap - set it with SKM_DBCONN_PASSWORD or --dbpassword")
 	}
@@ -425,7 +438,7 @@ func Bootstrap(ctx context.Context, su string, supwd string, out io.Writer) erro
 			return fmt.Errorf("invalid user or schema name %q - use lowercase letters, digits, _ or $ (starting with a letter or _), up to 63 characters", name)
 		}
 	}
-	conn, err := pgx.Connect(ctx, connString(su, supwd))
+	conn, err := pgx.Connect(ctx, cfg.connString(su, supwd))
 	if err != nil {
 		return fmt.Errorf("unable to connect to the database as the superuser: %w", err)
 	}
@@ -465,15 +478,15 @@ func Bootstrap(ctx context.Context, su string, supwd string, out io.Writer) erro
 }
 
 // CreateHistTables creates skima's history tables in the schema, if they don't exist yet
-func CreateHistTables(ctx context.Context, out io.Writer) error {
-	conn, err := acquireConn(ctx)
+func (d *DB) CreateHistTables(ctx context.Context, out io.Writer) error {
+	conn, err := d.acquireConn(ctx)
 	if err != nil {
 		return err
 	}
 	defer conn.Release()
 	// order matters - the statements table has a foreign key to the history table
 	for _, name := range []string{"skima_schema_history", "skima_schema_statements"} {
-		histTable, err := manifest.ParseTableByName(name)
+		histTable, err := manifest.ParseTableByName("", name) // embedded - no working directory
 		if err != nil {
 			return fmt.Errorf("unable to parse the %s table definition: %w", name, err)
 		}
@@ -496,16 +509,16 @@ func CreateHistTables(ctx context.Context, out io.Writer) error {
 
 // GetApplyHistory reads the most recent successful run and its statements - ErrNoHistTable when the schema has no
 // history tables, pgx.ErrNoRows when no run has succeeded
-func GetApplyHistory(ctx context.Context) (ApplyHistory, error) {
+func (d *DB) GetApplyHistory(ctx context.Context) (ApplyHistory, error) {
 	hist := ApplyHistory{}
-	conn, err := acquireConn(ctx)
+	conn, err := d.acquireConn(ctx)
 	if err != nil {
 		return hist, err
 	}
 	defer conn.Release()
 
 	var rowcount int
-	err = conn.QueryRow(ctx, "select 1 from pg_tables where schemaname = $1 and tablename = $2", viper.GetString("dbconn.schema"), histTableName).Scan(&rowcount)
+	err = conn.QueryRow(ctx, "select 1 from pg_tables where schemaname = $1 and tablename = $2", d.cfg.Schema, histTableName).Scan(&rowcount)
 	switch err {
 	case nil:
 		// return the latest version of the db

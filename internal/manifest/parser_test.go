@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/spf13/viper"
 )
 
 // const tableJson = "{\"name\":\"documents\",\"columns\":[{\"name\":\"id\",\"datatype\":\"uuid\",\"nullable\":false},{\"name\":\"document_type\",\"datatype\":\"varchar\",\"nullable\":true},{\"name\":\"file_location\",\"datatype\":\"varchar\",\"nullable\":true},{\"name\":\"upload_timestamp\",\"datatype\":\"timestamp\",\"nullable\":false,\"default\":\"NOW()\",\"dfltfunc\":true},{\"name\":\"project_id\",\"datatype\":\"uuid\",\"nullable\":false}],\"primary-key\":[\"id\"],\"foreign-keys\":[{\"name\":\"doc_project_fk\",\"columns\":[\"project_id\"],\"reference\":{\"table\":\"projects\",\"columns\":[\"id\"]},\"deleterule\":\"no action\"}]}"
@@ -174,7 +172,7 @@ func TestFkDelta_GenerateDdl(t *testing.T) {
 	expected := "alter table child_table add constraint testing_fk foreign key (parent_id) references parent_table (id) on delete cascade"
 	fk := ForeignKey{Name: "testing_fk", Columns: []string{"parent_id"}, DeleteRule: "cascade", Reference: PrimaryKeyRef{"parent_table", []string{"id"}}}
 	delta := FkDelta{Object: "fk", Tablename: "child_table", Action: "add", Definition: fk}
-	fkDdl := mustDdl(t, delta)
+	fkDdl := mustDdl(t, "", delta)
 	if fkDdl != expected {
 		t.Errorf("Generated FK is not valid:\n EXPECTED: %s\n ACTUAL: %s\n", expected, fkDdl)
 	}
@@ -239,7 +237,7 @@ func TestSimpleDelta_GenerateDdlDrop(t *testing.T) {
 
 func testSimpleDelta_GenerateDdlFunc(sd SimpleDelta, expected string) func(t *testing.T) {
 	return func(t *testing.T) {
-		actual := mustDdl(t, sd)
+		actual := mustDdl(t, "", sd)
 		if actual != expected {
 			t.Errorf("Error generating Drop statement: EXPECTED: %s  ACTUAL: %s", expected, actual)
 		}
@@ -259,7 +257,7 @@ func TestColumnDelta_GenerateDdl(t *testing.T) {
 
 func testColumnDelta_GenerateDdlFunc(delta ColumnDelta, expected string) func(t *testing.T) {
 	return func(t *testing.T) {
-		actual := mustDdl(t, delta)
+		actual := mustDdl(t, "", delta)
 		if actual != expected {
 			t.Errorf("Error generating ddl for the ColumnDelta: EXPECTED: %s  ACTUAL: %s", expected, actual)
 		}
@@ -359,7 +357,7 @@ func TestScriptDelta(t *testing.T) {
 		t.Errorf("Error parsing DeltaJSON: %s", err)
 	}
 
-	if ddl := mustDdl(t, sqlDelta); ddl != masterScript {
+	if ddl := mustDdl(t, "", sqlDelta); ddl != masterScript {
 		t.Errorf("SqlDelta.Ddl failure - EXPECTED: %s  ACTUAL: %s", masterScript, ddl)
 	}
 }
@@ -379,8 +377,6 @@ func testVersionFunc(files []string, makeDir bool, expected string) func(t *test
 	return func(t *testing.T) {
 		reader = osReadWrapper{}
 		workdir := t.TempDir()
-		viper.Set("workdir", workdir)
-		t.Cleanup(func() { viper.Set("workdir", "") })
 		if makeDir {
 			deltaDir := filepath.Join(workdir, "deltas")
 			if err := os.Mkdir(deltaDir, 0o755); err != nil {
@@ -392,7 +388,7 @@ func testVersionFunc(files []string, makeDir bool, expected string) func(t *test
 				}
 			}
 		}
-		if actual := Version().String(); actual != expected {
+		if actual := Version(workdir).String(); actual != expected {
 			t.Errorf("Version mismatch - EXPECTED: %s  ACTUAL: %s", expected, actual)
 		}
 	}
@@ -509,9 +505,9 @@ func TestDefaultStringLiteral(t *testing.T) {
 }
 
 // mustDdl generates the delta's statement, failing the test on an error
-func mustDdl(t *testing.T, delta Delta) string {
+func mustDdl(t *testing.T, workdir string, delta Delta) string {
 	t.Helper()
-	ddl, err := delta.Ddl()
+	ddl, err := delta.Ddl(workdir)
 	if err != nil {
 		t.Fatal(err)
 	}

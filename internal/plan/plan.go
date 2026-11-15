@@ -11,7 +11,6 @@ import (
 
 	"github.com/johnmuhlestein/skima/internal/manifest"
 	"github.com/johnmuhlestein/skima/internal/util"
-	"github.com/spf13/viper"
 )
 
 // Step kinds
@@ -148,15 +147,22 @@ func (p Plan) Statements() int {
 	return count
 }
 
+// Planner plans the runs of the manifest in Workdir - the state build, the state sql files, the changesets
+type Planner struct {
+	Workdir string
+	// Schema is the schema the plan is for - shown in the plan, not used to connect
+	Schema string
+}
+
 // ForState plans the state build that apply runs against a schema skima does not manage yet: the pre sql files, tables,
 // foreign keys, views and post sql files. transactional is the state.transaction setting
-func ForState(transactional bool) (Plan, error) {
-	version := manifest.Version()
+func (pl Planner) ForState(transactional bool) (Plan, error) {
+	version := manifest.Version(pl.Workdir)
 	unit := Unit{Kind: UnitState, SemVer: version, Version: version.String(), Transactional: transactional}
-	workdir := viper.GetString("workdir")
+	workdir := pl.Workdir
 
 	// the rest of the build depends on the pre sql files, e.g. trigger functions
-	pre, err := sqlFileSteps("pre", true)
+	pre, err := pl.sqlFileSteps("pre", true)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -170,12 +176,12 @@ func ForState(transactional bool) (Plan, error) {
 	for _, path := range enumPaths {
 		enum, err := manifest.ParseEnumByPath(path)
 		if err != nil {
-			return Plan{}, fmt.Errorf("unable to parse %s: %w", relative(path), err)
+			return Plan{}, fmt.Errorf("unable to parse %s: %w", pl.relative(path), err)
 		}
-		unit.Steps = append(unit.Steps, Step{Kind: KindEnum, Describe: enum.Name, Source: relative(path), Sql: []string{enum.GenerateDdl()},
+		unit.Steps = append(unit.Steps, Step{Kind: KindEnum, Describe: enum.Name, Source: pl.relative(path), Sql: []string{enum.GenerateDdl()},
 			Tolerate: []string{codeDuplicateObject}, Record: Record{Type: "Create Type", Name: enum.Name}})
 		if enum.Comment != "" {
-			unit.Steps = append(unit.Steps, commentStep("enum", enum.Name, enum.Comment, relative(path), 0))
+			unit.Steps = append(unit.Steps, commentStep("enum", enum.Name, enum.Comment, pl.relative(path), 0))
 		}
 	}
 
@@ -188,15 +194,15 @@ func ForState(transactional bool) (Plan, error) {
 	for _, path := range sequencePaths {
 		seq, err := manifest.ParseSequenceByPath(path)
 		if err != nil {
-			return Plan{}, fmt.Errorf("unable to parse %s: %w", relative(path), err)
+			return Plan{}, fmt.Errorf("unable to parse %s: %w", pl.relative(path), err)
 		}
-		unit.Steps = append(unit.Steps, Step{Kind: KindSequence, Describe: seq.Name, Source: relative(path), Sql: []string{seq.GenerateDdl()},
+		unit.Steps = append(unit.Steps, Step{Kind: KindSequence, Describe: seq.Name, Source: pl.relative(path), Sql: []string{seq.GenerateDdl()},
 			Tolerate: []string{codeDuplicateTable}, Record: Record{Type: "Create Sequence", Name: seq.Name}})
 		if seq.Comment != "" {
-			unit.Steps = append(unit.Steps, commentStep("sequence", seq.Name, seq.Comment, relative(path), 0))
+			unit.Steps = append(unit.Steps, commentStep("sequence", seq.Name, seq.Comment, pl.relative(path), 0))
 		}
 		if seq.Ownedby != "" {
-			owners = append(owners, ownedByStep(seq, relative(path), 0))
+			owners = append(owners, ownedByStep(seq, pl.relative(path), 0))
 		}
 	}
 
@@ -208,10 +214,10 @@ func ForState(transactional bool) (Plan, error) {
 	for _, path := range tablePaths {
 		table, err := manifest.ParseTableByPath(path)
 		if err != nil {
-			return Plan{}, fmt.Errorf("unable to parse %s: %w", relative(path), err)
+			return Plan{}, fmt.Errorf("unable to parse %s: %w", pl.relative(path), err)
 		}
-		unit.Steps = append(unit.Steps, tableSteps(table, relative(path), 0)...)
-		fks = append(fks, fkSteps(table, relative(path), 0)...)
+		unit.Steps = append(unit.Steps, tableSteps(table, pl.relative(path), 0)...)
+		fks = append(fks, fkSteps(table, pl.relative(path), 0)...)
 	}
 	// sequences are owned and foreign keys added once every table exists
 	unit.Steps = append(unit.Steps, owners...)
@@ -224,13 +230,13 @@ func ForState(transactional bool) (Plan, error) {
 	for _, path := range viewPaths {
 		view, err := manifest.ParseViewByPath(path)
 		if err != nil {
-			return Plan{}, fmt.Errorf("unable to parse %s: %w", relative(path), err)
+			return Plan{}, fmt.Errorf("unable to parse %s: %w", pl.relative(path), err)
 		}
-		unit.Steps = append(unit.Steps, Step{Kind: KindView, Describe: view.Name, Source: relative(path), Sql: []string{view.GenerateDdl()}, Retryable: true,
+		unit.Steps = append(unit.Steps, Step{Kind: KindView, Describe: view.Name, Source: pl.relative(path), Sql: []string{view.GenerateDdl()}, Retryable: true,
 			Record: Record{Type: "Create View", Name: view.Name}})
 		if view.Comment != "" {
 			// retried with its view, which may not be created until a retry
-			comment := commentStep("view", view.Name, view.Comment, relative(path), 0)
+			comment := commentStep("view", view.Name, view.Comment, pl.relative(path), 0)
 			comment.Retryable = true
 			unit.Steps = append(unit.Steps, comment)
 		}
@@ -244,23 +250,23 @@ func ForState(transactional bool) (Plan, error) {
 	for _, path := range matviewPaths {
 		mv, err := manifest.ParseMatviewByPath(path)
 		if err != nil {
-			return Plan{}, fmt.Errorf("unable to parse %s: %w", relative(path), err)
+			return Plan{}, fmt.Errorf("unable to parse %s: %w", pl.relative(path), err)
 		}
-		create := Step{Kind: KindMatview, Describe: mv.Name, Source: relative(path), Sql: []string{mv.GenerateDdl()}, Shadow: mv.ShadowDdl(),
+		create := Step{Kind: KindMatview, Describe: mv.Name, Source: pl.relative(path), Sql: []string{mv.GenerateDdl()}, Shadow: mv.ShadowDdl(),
 			Record: Record{Type: "Create Materialized View", Name: mv.Name}}
-		for _, step := range append([]Step{create}, matviewParts(mv, relative(path), 0)...) {
+		for _, step := range append([]Step{create}, matviewParts(mv, pl.relative(path), 0)...) {
 			step.Retryable = true
 			unit.Steps = append(unit.Steps, step)
 		}
 	}
 
-	post, err := sqlFileSteps("post", false)
+	post, err := pl.sqlFileSteps("post", false)
 	if err != nil {
 		return Plan{}, err
 	}
 	unit.Steps = append(unit.Steps, post...)
 
-	p := Plan{Schema: viper.GetString("dbconn.schema"), To: unit.Version, Units: []Unit{unit}}
+	p := Plan{Schema: pl.Schema, To: unit.Version, Units: []Unit{unit}}
 	if !transactional {
 		p.Warnings = append(p.Warnings, "the state build runs without a transaction (state.transaction is false) - a failure part way through leaves the earlier objects in place")
 	}
@@ -268,25 +274,25 @@ func ForState(transactional bool) (Plan, error) {
 }
 
 // ForStateSql plans apply --sql: only the state build's pre sql files, each applied even when an earlier one fails
-func ForStateSql(transactional bool) (Plan, error) {
-	steps, err := sqlFileSteps("pre", false)
+func (pl Planner) ForStateSql(transactional bool) (Plan, error) {
+	steps, err := pl.sqlFileSteps("pre", false)
 	if err != nil {
 		return Plan{}, err
 	}
-	version := manifest.Version()
+	version := manifest.Version(pl.Workdir)
 	unit := Unit{Kind: UnitStateSql, SemVer: version, Version: version.String(), Transactional: transactional, Steps: steps}
-	return Plan{Schema: viper.GetString("dbconn.schema"), To: unit.Version, Units: []Unit{unit}}, nil
+	return Plan{Schema: pl.Schema, To: unit.Version, Units: []Unit{unit}}, nil
 }
 
 // ForChangesets plans the changesets newer than the deployed version, in the order apply runs them
-func ForChangesets(deployed util.SemanticVersion) (Plan, error) {
-	p := Plan{Schema: viper.GetString("dbconn.schema"), From: deployed.String(), To: deployed.String()}
-	files, err := manifest.ListFiles(filepath.Join(viper.GetString("workdir"), "deltas"), "json")
+func (pl Planner) ForChangesets(deployed util.SemanticVersion) (Plan, error) {
+	p := Plan{Schema: pl.Schema, From: deployed.String(), To: deployed.String()}
+	files, err := manifest.ListFiles(filepath.Join(pl.Workdir, "deltas"), "json")
 	if err != nil {
 		return Plan{}, err
 	}
 	for _, path := range util.NewerVersions(deployed, files) {
-		unit, warnings, err := changesetUnit(path)
+		unit, warnings, err := pl.changesetUnit(path)
 		if err != nil {
 			return Plan{}, err
 		}
@@ -299,12 +305,12 @@ func ForChangesets(deployed util.SemanticVersion) (Plan, error) {
 
 // ForChangesetFile plans one changeset file, wherever it is - e.g. a changeset that has not been added to the manifest
 // yet. Its deltas read their definitions from the configured working directory's state files, like apply's do
-func ForChangesetFile(path string) (Unit, []string, error) {
-	return changesetUnit(path)
+func (pl Planner) ForChangesetFile(path string) (Unit, []string, error) {
+	return pl.changesetUnit(path)
 }
 
-func changesetUnit(path string) (Unit, []string, error) {
-	file := relative(path)
+func (pl Planner) changesetUnit(path string) (Unit, []string, error) {
+	file := pl.relative(path)
 	cs, err := manifest.ParseChangeSet(path)
 	if err != nil {
 		return Unit{}, nil, fmt.Errorf("unable to parse %s: %w", file, err)
@@ -324,7 +330,7 @@ func changesetUnit(path string) (Unit, []string, error) {
 		}
 		hooks, isHooked := delta.(hooked)
 		if isHooked {
-			step, err := hookStep(KindPreHook, hooks.Hooks().Pre, delta, source, position)
+			step, err := pl.hookStep(KindPreHook, hooks.Hooks().Pre, delta, source, position)
 			if err != nil {
 				return fail(err)
 			}
@@ -336,7 +342,7 @@ func changesetUnit(path string) (Unit, []string, error) {
 		switch d := delta.(type) {
 		case manifest.SimpleDelta:
 			if d.Object == "table" && d.Action == "add" {
-				table, err := manifest.ParseTableByName(d.Name)
+				table, err := manifest.ParseTableByName(pl.Workdir, d.Name)
 				if err != nil {
 					return fail(fmt.Errorf("unable to parse the table %s: %w", d.Name, err))
 				}
@@ -348,19 +354,19 @@ func changesetUnit(path string) (Unit, []string, error) {
 				}
 				break
 			}
-			ddl, err := d.Ddl()
+			ddl, err := d.Ddl(pl.Workdir)
 			step, err := deltaStep(delta, ddl, err, source, position)
 			if err != nil {
 				return fail(err)
 			}
 			if d.Object == "function" && d.Action == "add" && !step.Skipped {
-				if fnFile, err := d.FunctionFile(); err == nil {
-					step.Script = relative(fnFile)
+				if fnFile, err := d.FunctionFile(pl.Workdir); err == nil {
+					step.Script = pl.relative(fnFile)
 				}
 			}
 			unit.Steps = append(unit.Steps, step)
 		case manifest.ColumnDelta:
-			ddl, err := d.Ddl()
+			ddl, err := d.Ddl(pl.Workdir)
 			if err != nil {
 				// apply skips a column delta whose table cannot be read rather than failing
 				unit.Steps = append(unit.Steps, Step{Kind: KindDelta, Describe: describe(d), Source: source, Delta: position, Skipped: true,
@@ -374,19 +380,19 @@ func changesetUnit(path string) (Unit, []string, error) {
 			}
 			unit.Steps = append(unit.Steps, step)
 		case manifest.SqlDelta:
-			statements, err := d.Statements()
+			statements, err := d.Statements(pl.Workdir)
 			if err != nil {
 				return fail(err)
 			}
 			step := Step{Kind: KindScript, Describe: d.Describe(), Source: source, Delta: position, Sql: statements, Tolerate: d.Bypass,
 				Record: Record{Type: "delta", PerStatement: true}}
 			if len(d.Script) > 0 {
-				step.Script = relative(manifest.ScriptPath(viper.GetString("workdir"), d.Script))
+				step.Script = pl.relative(manifest.ScriptPath(pl.Workdir, d.Script))
 				step.Record.Type = "delta script"
 			}
 			unit.Steps = append(unit.Steps, step)
 		default:
-			ddl, err := delta.Ddl()
+			ddl, err := delta.Ddl(pl.Workdir)
 			step, err := deltaStep(delta, ddl, err, source, position)
 			if err != nil {
 				return fail(err)
@@ -399,9 +405,9 @@ func changesetUnit(path string) (Unit, []string, error) {
 			warnings = append(warnings, fmt.Sprintf("%s: %s", source, last.Note))
 			continue // apply does not run the post hook of a skipped delta
 		}
-		unit.Steps = append(unit.Steps, addedParts(delta, source, position)...)
+		unit.Steps = append(unit.Steps, pl.addedParts(delta, source, position)...)
 		if d, ok := delta.(manifest.SimpleDelta); ok && d.Object == "sequence" && d.Action == "add" {
-			if seq, err := manifest.ParseSequenceByName(d.Name); err == nil && seq.Ownedby != "" {
+			if seq, err := manifest.ParseSequenceByName(pl.Workdir, d.Name); err == nil && seq.Ownedby != "" {
 				owner := ownedByStep(seq, source, position)
 				owner.Deferred = true
 				deferred = append(deferred, owner)
@@ -411,7 +417,7 @@ func changesetUnit(path string) (Unit, []string, error) {
 			warnings = append(warnings, fmt.Sprintf("%s: changeset %s adds the value '%s' to enum %s in a transaction - postgres does not let the value be used until the changeset commits, so use it in a later changeset", source, cs.Version, d.Value, d.Name))
 		}
 		if isHooked {
-			step, err := hookStep(KindPostHook, hooks.Hooks().Post, delta, source, position)
+			step, err := pl.hookStep(KindPostHook, hooks.Hooks().Post, delta, source, position)
 			if err != nil {
 				return fail(err)
 			}
@@ -484,8 +490,8 @@ type hooked interface {
 	Hooks() manifest.PrePostHook
 }
 
-func hookStep(kind string, hook manifest.Hook, delta manifest.Delta, source string, position int) (*Step, error) {
-	statements, err := hook.Statements()
+func (pl Planner) hookStep(kind string, hook manifest.Hook, delta manifest.Delta, source string, position int) (*Step, error) {
+	statements, err := hook.Statements(pl.Workdir)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", kind, err)
 	}
@@ -495,7 +501,7 @@ func hookStep(kind string, hook manifest.Hook, delta manifest.Delta, source stri
 	step := Step{Kind: kind, Describe: describe(delta), Source: source, Delta: position, Sql: statements,
 		Record: Record{Type: kind, PerStatement: true}}
 	if len(hook.Sql) == 0 {
-		step.Script = relative(manifest.ScriptPath(viper.GetString("workdir"), hook.Script))
+		step.Script = pl.relative(manifest.ScriptPath(pl.Workdir, hook.Script))
 		step.Record = Record{Type: "Delta script hook", FailType: fmt.Sprintf("Delta script hook [%s]", hook.Script), Name: hook.Script}
 	}
 	return &step, nil
@@ -535,7 +541,7 @@ func matviewParts(mv manifest.Matview, source string, position int) []Step {
 // addedParts are the parts of an object a delta adds that are created separately - the comments of a view, enum,
 // sequence or column, and a materialized view's indexes and comment - a delta that adds an object creates it as its
 // state file describes, comment included. A table add's comments are part of its table steps
-func addedParts(delta manifest.Delta, source string, position int) []Step {
+func (pl Planner) addedParts(delta manifest.Delta, source string, position int) []Step {
 	switch d := delta.(type) {
 	case manifest.SimpleDelta:
 		if d.Action != "add" {
@@ -543,23 +549,23 @@ func addedParts(delta manifest.Delta, source string, position int) []Step {
 		}
 		switch d.Object {
 		case "view":
-			if view, err := manifest.ParseViewByName(d.Name); err == nil && view.Comment != "" {
+			if view, err := manifest.ParseViewByName(pl.Workdir, d.Name); err == nil && view.Comment != "" {
 				return []Step{commentStep("view", d.Name, view.Comment, source, position)}
 			}
 		case "enum":
-			if enum, err := manifest.ParseEnumByName(d.Name); err == nil && enum.Comment != "" {
+			if enum, err := manifest.ParseEnumByName(pl.Workdir, d.Name); err == nil && enum.Comment != "" {
 				return []Step{commentStep("enum", d.Name, enum.Comment, source, position)}
 			}
 		case "sequence":
-			if seq, err := manifest.ParseSequenceByName(d.Name); err == nil && seq.Comment != "" {
+			if seq, err := manifest.ParseSequenceByName(pl.Workdir, d.Name); err == nil && seq.Comment != "" {
 				return []Step{commentStep("sequence", d.Name, seq.Comment, source, position)}
 			}
 		case "matview":
-			if mv, err := manifest.ParseMatviewByName(d.Name); err == nil {
+			if mv, err := manifest.ParseMatviewByName(pl.Workdir, d.Name); err == nil {
 				return matviewParts(mv, source, position)
 			}
 		case "column":
-			if table, err := manifest.ParseTableByName(d.Reference); err == nil {
+			if table, err := manifest.ParseTableByName(pl.Workdir, d.Reference); err == nil {
 				if col, ok := table.Column(d.Name); ok && col.Comment != "" {
 					return []Step{commentStep("column", d.Reference+"."+d.Name, col.Comment, source, position)}
 				}
@@ -616,8 +622,8 @@ func fkSteps(table manifest.Table, source string, position int) []Step {
 }
 
 // sqlFileSteps runs the state sql files of the phase (pre or post), in file name order
-func sqlFileSteps(phase string, stopOnFailure bool) ([]Step, error) {
-	paths, err := manifest.ListFiles(filepath.Join(viper.GetString("workdir"), "state", "sql", phase), "sql")
+func (pl Planner) sqlFileSteps(phase string, stopOnFailure bool) ([]Step, error) {
+	paths, err := manifest.ListFiles(filepath.Join(pl.Workdir, "state", "sql", phase), "sql")
 	if err != nil {
 		return nil, err
 	}
@@ -625,17 +631,17 @@ func sqlFileSteps(phase string, stopOnFailure bool) ([]Step, error) {
 	for _, path := range paths {
 		dat, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("unable to read %s: %w", relative(path), err)
+			return nil, fmt.Errorf("unable to read %s: %w", pl.relative(path), err)
 		}
-		steps = append(steps, Step{Kind: KindSql, Describe: filepath.Base(path), Source: relative(path), Script: relative(path), Sql: []string{string(dat)},
+		steps = append(steps, Step{Kind: KindSql, Describe: filepath.Base(path), Source: pl.relative(path), Script: pl.relative(path), Sql: []string{string(dat)},
 			StopOnFailure: stopOnFailure, Record: Record{Type: "sql", Name: filepath.Base(path)}})
 	}
 	return steps, nil
 }
 
 // relative shows a manifest path relative to the working directory, with forward slashes
-func relative(path string) string {
-	if rel, err := filepath.Rel(viper.GetString("workdir"), path); err == nil && !strings.HasPrefix(rel, "..") {
+func (pl Planner) relative(path string) string {
+	if rel, err := filepath.Rel(pl.Workdir, path); err == nil && !strings.HasPrefix(rel, "..") {
 		return filepath.ToSlash(rel)
 	}
 	return filepath.ToSlash(path)

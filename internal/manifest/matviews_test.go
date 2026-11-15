@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/johnmuhlestein/skima/internal/util"
-	"github.com/spf13/viper"
 )
 
 func TestMatviewDdl(t *testing.T) {
@@ -37,11 +36,10 @@ func TestMatviewDdl(t *testing.T) {
 
 func TestMatviewDelta(t *testing.T) {
 	reader = osReadWrapper{}
-	viper.Set("workdir", writeManifest(t, map[string]string{
+	workdir := writeManifest(t, map[string]string{
 		"state/doc_counts-matview.json": `{"name":"doc_counts","columns":["status","n"],"sql":"select status, count(*) from docs group by status",
 			"indexes":[{"name":"doc_counts_status_idx","columns":["status"],"unique":true}],"comment":"Counts"}`,
-	}))
-	t.Cleanup(func() { viper.Set("workdir", "") })
+	})
 	cases := []struct {
 		delta    SimpleDelta
 		expected string
@@ -55,14 +53,14 @@ func TestMatviewDelta(t *testing.T) {
 		{SimpleDelta{Object: "comment", Action: "add", On: "matview", Name: "doc_counts"}, "comment on materialized view doc_counts is 'Counts'"},
 	}
 	for _, c := range cases {
-		if ddl, err := c.delta.Ddl(); err != nil || ddl != c.expected {
+		if ddl, err := c.delta.Ddl(workdir); err != nil || ddl != c.expected {
 			t.Errorf("%s: EXPECTED %s  ACTUAL: %s, %v", c.delta.Describe(), c.expected, ddl, err)
 		}
 	}
 	if d := (SimpleDelta{Object: "matview", Action: "refresh", Name: "doc_counts", Concurrently: true}); d.Describe() != "refresh doc_counts (concurrently)" {
 		t.Errorf("EXPECTED concurrently in the description  ACTUAL: %s", d.Describe())
 	}
-	if _, err := (SimpleDelta{Object: "index", Action: "add", Name: "x", Reference: "absent"}).Ddl(); err == nil || !strings.Contains(err.Error(), "absent") {
+	if _, err := (SimpleDelta{Object: "index", Action: "add", Name: "x", Reference: "absent"}).Ddl(workdir); err == nil || !strings.Contains(err.Error(), "absent") {
 		t.Errorf("EXPECTED an error naming the missing table  ACTUAL: %v", err)
 	}
 }
@@ -87,8 +85,6 @@ func TestMatviewValidation(t *testing.T) {
 		]}`,
 		"deltas/v1_0_2.json": `{"deltas":[{"object":"matview","action":"add","name":"doc_counts","concurrently":true}]}`,
 	})
-	viper.Set("workdir", workdir)
-	t.Cleanup(func() { viper.Set("workdir", "") })
 	since := util.ExtractVersion("1.0.0")
 	results, err := ValidateManifest(workdir, &since)
 	if err != nil {

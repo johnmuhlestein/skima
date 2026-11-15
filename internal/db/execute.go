@@ -16,14 +16,14 @@ import (
 //
 // Cancelling ctx (Ctrl+C) stops the run at the statement it is running: the transaction is rolled back and the run is
 // marked 'cancelled'. Progress goes to out, failures to errOut
-func ApplyUnit(ctx context.Context, history *ApplyHistory, unit plan.Unit, out, errOut io.Writer) (int, error) {
+func (d *DB) ApplyUnit(ctx context.Context, history *ApplyHistory, unit plan.Unit, out, errOut io.Writer) (int, error) {
 	name, optOut := runName(unit)
-	r, err := beginRun(ctx, history, name, unit.Transactional, optOut, out, errOut)
+	r, err := d.beginRun(ctx, history, name, unit.Transactional, optOut, out, errOut)
 	if err != nil {
 		history.Status = "failed"
 		return 1, err
 	}
-	failures := executor{ctx: ctx, ex: r.ex, record: recordStatementHist, history: history, out: out, errOut: errOut}.run(unit.Steps)
+	failures := executor{ctx: ctx, ex: r.ex, record: d.recordStatementHist, history: history, out: out, errOut: errOut}.run(unit.Steps)
 	return r.finish(ctx, failures), nil
 }
 

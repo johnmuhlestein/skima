@@ -7,25 +7,31 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/johnmuhlestein/skima/internal/changes"
+	"github.com/johnmuhlestein/skima/internal/db"
 	"github.com/johnmuhlestein/skima/internal/editor"
 	"github.com/johnmuhlestein/skima/internal/manifest"
-	"github.com/spf13/viper"
 )
 
 // database skips the test unless a postgres is configured: SKIMA_VERIFY_DATABASE=1 and the usual SKM_DBCONN_* settings
 // (connstring, port, database, schema, username, password). Verify needs the CREATE privilege
-func database(t *testing.T) {
+func database(t *testing.T) *db.DB {
 	t.Helper()
 	if os.Getenv("SKIMA_VERIFY_DATABASE") != "1" {
 		t.Skip("set SKIMA_VERIFY_DATABASE=1 and SKM_DBCONN_* to verify changesets against postgres")
 	}
-	viper.SetEnvPrefix("skm")
-	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	viper.AutomaticEnv()
+	port, _ := strconv.Atoi(os.Getenv("SKM_DBCONN_PORT"))
+	database, err := db.Open(db.Config{Host: os.Getenv("SKM_DBCONN_CONNSTRING"), Port: port, Database: os.Getenv("SKM_DBCONN_DATABASE"),
+		Schema: os.Getenv("SKM_DBCONN_SCHEMA"), User: os.Getenv("SKM_DBCONN_USERNAME"), Password: os.Getenv("SKM_DBCONN_PASSWORD")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(database.Close)
+	return database
 }
 
 // fixture commits a copy of the plan fixture manifest to a new git repository - the baseline
@@ -78,9 +84,9 @@ func (e *edits) must(result editor.Result, err error) {
 func str(s string) *string { return &s }
 func boolean(b bool) *bool { return &b }
 
-func expectVerified(t *testing.T, workdir string, baseline changes.Baseline, draft changes.Draft) {
+func expectVerified(t *testing.T, database *db.DB, workdir string, baseline changes.Baseline, draft changes.Draft) {
 	t.Helper()
-	report, err := Run(context.Background(), workdir, baseline, draft)
+	report, err := Run(context.Background(), database, workdir, baseline, draft)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +96,7 @@ func expectVerified(t *testing.T, workdir string, baseline changes.Baseline, dra
 }
 
 func TestVerifyColumnChanges(t *testing.T) {
-	database(t)
+	database := database(t)
 	workdir, baseline := fixture(t)
 	e := &edits{t: t, ed: editor.New(workdir)}
 	e.must(e.ed.RenameColumn("documents", e.etag("documents"), "file_location", "storage_path"))
@@ -101,11 +107,11 @@ func TestVerifyColumnChanges(t *testing.T) {
 	e.must(e.ed.DropColumn("tags", e.etag("tags"), "color", false))
 	e.must(e.ed.AlterColumn("projects", e.etag("projects"), "name", editor.ColumnChanges{Default: str("it's unnamed")}))
 	e.must(e.ed.SetTableComment("projects", e.etag("projects"), "projects documents belong to"))
-	expectVerified(t, workdir, baseline, e.draft)
+	expectVerified(t, database, workdir, baseline, e.draft)
 }
 
 func TestVerifyTables(t *testing.T) {
-	database(t)
+	database := database(t)
 	workdir, baseline := fixture(t)
 	e := &edits{t: t, ed: editor.New(workdir)}
 	e.must(e.ed.CreateTable(manifest.Table{Name: "audit_log", Comment: "who changed what",
@@ -114,11 +120,11 @@ func TestVerifyTables(t *testing.T) {
 		ForeignKeys: []manifest.ForeignKey{{Name: "audit_log_project_fk", Columns: []string{"project_id"}, Reference: manifest.PrimaryKeyRef{Table: "projects", Columns: []string{"id"}}}},
 		Indexes:     []manifest.Index{{Name: "audit_log_project_idx", Columns: []string{"project_id"}}}}))
 	e.must(e.ed.DropTable("tags", e.etag("tags"), true)) // cascade: its sequence goes too
-	expectVerified(t, workdir, baseline, e.draft)
+	expectVerified(t, database, workdir, baseline, e.draft)
 }
 
 func TestVerifyKeysAndObjects(t *testing.T) {
-	database(t)
+	database := database(t)
 	workdir, baseline := fixture(t)
 	e := &edits{t: t, ed: editor.New(workdir)}
 	documents, _, _ := e.ed.Table("documents")
@@ -136,12 +142,12 @@ func TestVerifyKeysAndObjects(t *testing.T) {
 	e.must(e.ed.PutConstraint("documents", e.etag("documents"), manifest.Constraint{Name: "documents_id_unq", Type: "unique", Columns: []string{"id"}}))
 	e.must(e.ed.SetPrimaryKey("documents", e.etag("documents"), []string{"id", "project_id"}))
 	e.must(e.ed.AlterColumn("tags", e.etag("tags"), "document_id", editor.ColumnChanges{Nullable: boolean(true)}))
-	expectVerified(t, workdir, baseline, e.draft)
+	expectVerified(t, database, workdir, baseline, e.draft)
 }
 
 // verify must catch a changeset that doesn't bring the baseline to the current state - otherwise it proves nothing
 func TestVerifyCatchesWrongChangesets(t *testing.T) {
-	database(t)
+	database := database(t)
 	workdir, baseline := fixture(t)
 	e := &edits{t: t, ed: editor.New(workdir)}
 	e.must(e.ed.AddColumn("documents", e.etag("documents"), manifest.Column{Name: "notes", Datatype: "text", Nullable: true}))
@@ -152,7 +158,7 @@ func TestVerifyCatchesWrongChangesets(t *testing.T) {
 	}
 
 	// a delta left out: the index is missing
-	report, err := Deltas(context.Background(), workdir, baseline, diff.Deltas[:1])
+	report, err := Deltas(context.Background(), database, workdir, baseline, diff.Deltas[:1])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +168,7 @@ func TestVerifyCatchesWrongChangesets(t *testing.T) {
 
 	// a delta that fails to apply
 	broken := append(diff.Deltas, changes.Delta{Object: "script", Description: "broken", Sql: []string{"alter table no_such_table add column x integer"}})
-	report, err = Deltas(context.Background(), workdir, baseline, broken)
+	report, err = Deltas(context.Background(), database, workdir, baseline, broken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,9 +212,9 @@ func fileLocationDelta(d changes.Delta) bool {
 	return d.Reference == "documents" && (d.Name == "file_location" || d.Name == "storage_path" || d.Name == "documents_file_location_unq")
 }
 
-func expectFileVerified(t *testing.T, workdir string, baseline changes.Baseline, path string) Report {
+func expectFileVerified(t *testing.T, database *db.DB, workdir string, baseline changes.Baseline, path string) Report {
 	t.Helper()
-	report, err := File(context.Background(), workdir, baseline, path)
+	report, err := File(context.Background(), database, workdir, baseline, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +227,7 @@ func expectFileVerified(t *testing.T, workdir string, baseline changes.Baseline,
 // the intent of a generated changeset is changed by editing it: a column renamed by hand in the state file, with no
 // hint, generates a drop and an add - edited into a rename, and then into an add, a data migration and a drop
 func TestVerifyHandEditedChangeset(t *testing.T) {
-	database(t)
+	database := database(t)
 	workdir, baseline := fixture(t)
 	documents := filepath.Join(workdir, "state", "documents-table.json")
 	content, err := os.ReadFile(documents)
@@ -236,7 +242,7 @@ func TestVerifyHandEditedChangeset(t *testing.T) {
 	path, generated := build(t, workdir, baseline)
 	t.Logf("generated: %+v", generated.Deltas)
 	// the generated drop and add verifies too - verify proves the schema, not the data
-	expectFileVerified(t, workdir, baseline, path)
+	expectFileVerified(t, database, workdir, baseline, path)
 
 	var others []changes.Delta
 	for _, d := range generated.Deltas {
@@ -252,7 +258,7 @@ func TestVerifyHandEditedChangeset(t *testing.T) {
 	renamed := generated
 	renamed.Deltas = append([]changes.Delta{{Object: "column", Action: "rename", Name: "file_location", NewName: "storage_path", Reference: "documents"}}, others...)
 	rewrite(t, path, renamed)
-	if report := expectFileVerified(t, workdir, baseline, path); report.Deltas != len(renamed.Deltas) {
+	if report := expectFileVerified(t, database, workdir, baseline, path); report.Deltas != len(renamed.Deltas) {
 		t.Errorf("EXPECTED %d deltas  ACTUAL: %d", len(renamed.Deltas), report.Deltas)
 	}
 
@@ -266,11 +272,11 @@ func TestVerifyHandEditedChangeset(t *testing.T) {
 		{Object: "constraint", Action: "add", Name: "documents_file_location_unq", Reference: "documents"},
 	}, others...)
 	rewrite(t, path, migrated)
-	expectFileVerified(t, workdir, baseline, path)
+	expectFileVerified(t, database, workdir, baseline, path)
 
 	// a wrong edit: the rename left out, so the column isn't there
 	rewrite(t, path, changes.Changeset{Description: "wrong", Deltas: others})
-	report, err := File(context.Background(), workdir, baseline, path)
+	report, err := File(context.Background(), database, workdir, baseline, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +287,7 @@ func TestVerifyHandEditedChangeset(t *testing.T) {
 	// an edit that breaks the file is reported before anything runs
 	rewrite(t, path, changes.Changeset{Description: "invalid", Deltas: append([]changes.Delta{{Object: "column", Action: "add", Name: "nope", Reference: "documents"}}, others...)})
 	var invalid *changes.InvalidChangesetError
-	if _, err = File(context.Background(), workdir, baseline, path); !errors.As(err, &invalid) {
+	if _, err = File(context.Background(), database, workdir, baseline, path); !errors.As(err, &invalid) {
 		t.Errorf("EXPECTED an InvalidChangesetError  ACTUAL: %v", err)
 	}
 }
@@ -289,7 +295,7 @@ func TestVerifyHandEditedChangeset(t *testing.T) {
 // names that are postgres keywords are quoted in every generated statement - tables user and order, keyword columns,
 // keys, an index, a constraint, a comment, a rename and a backfill
 func TestVerifyKeywordNames(t *testing.T) {
-	database(t)
+	database := database(t)
 	workdir, baseline := fixture(t)
 	e := &edits{t: t, ed: editor.New(workdir)}
 	e.must(e.ed.CreateTable(manifest.Table{Name: "user", Comment: "a keyword table",
@@ -301,7 +307,7 @@ func TestVerifyKeywordNames(t *testing.T) {
 		Columns:     []manifest.Column{{Name: "id", Datatype: "integer"}, {Name: "user", Datatype: "integer", Nullable: true}},
 		PrimaryKey:  []string{"id"},
 		ForeignKeys: []manifest.ForeignKey{{Name: "order_user_fk", Columns: []string{"user"}, Reference: manifest.PrimaryKeyRef{Table: "user", Columns: []string{"id"}}}}}))
-	expectVerified(t, workdir, baseline, e.draft)
+	expectVerified(t, database, workdir, baseline, e.draft)
 
 	// changes to the keyword tables, measured from a baseline that has them
 	commit(t, workdir, "keyword tables")
@@ -316,7 +322,7 @@ func TestVerifyKeywordNames(t *testing.T) {
 	e.must(e.ed.AlterColumn("order", e.etag("order"), "user", editor.ColumnChanges{Nullable: boolean(false)}))
 	e.must(e.ed.PutIndex("order", e.etag("order"), manifest.Index{Name: "order_limit_idx", Columns: []string{"limit"}}))
 	e.must(e.ed.DropConstraint("user", e.etag("user"), "user_group_unq"))
-	expectVerified(t, workdir, baseline, e.draft)
+	expectVerified(t, database, workdir, baseline, e.draft)
 }
 
 func commit(t *testing.T, workdir string, message string) {

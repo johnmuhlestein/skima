@@ -28,7 +28,12 @@ Example:
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
-			applyHist, err := db.GetApplyHistory(cmd.Context())
+			database, err := openDB()
+			if err != nil {
+				return err
+			}
+			defer database.Close()
+			applyHist, err := database.GetApplyHistory(cmd.Context())
 			switch {
 			case errors.Is(err, db.ErrNoHistTable):
 				fmt.Fprintln(out, "Schema is not managed by skima - run 'skima apply' to deploy it, or 'skima apply --hist' to only create the history tables")

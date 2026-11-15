@@ -12,7 +12,6 @@ import (
 	"github.com/johnmuhlestein/skima/internal/manifest"
 	"github.com/johnmuhlestein/skima/internal/util"
 	"github.com/johnmuhlestein/skima/internal/verify"
-	"github.com/spf13/viper"
 )
 
 //go:embed openapi.json
@@ -486,7 +485,7 @@ func (s *Server) getChanges(w http.ResponseWriter, r *http.Request) {
 // verifyChanges proves the generated changeset against the database - see verify.Run. It needs the database settings
 // and the CREATE privilege; a changeset that doesn't verify is still a 200, with verified false
 func (s *Server) verifyChanges(w http.ResponseWriter, r *http.Request) {
-	if !verifyAvailable(w) {
+	if !s.verifyAvailable(w) {
 		return
 	}
 	baseline, ok := s.resolveBaseline(w, r)
@@ -498,7 +497,7 @@ func (s *Server) verifyChanges(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, err)
 		return
 	}
-	report, err := verify.Run(r.Context(), s.workdir, baseline, draft)
+	report, err := verify.Run(r.Context(), s.database, s.workdir, baseline, draft)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "verify_unavailable", "unable to verify against the database: "+err.Error(), nil)
 		return
@@ -506,9 +505,9 @@ func (s *Server) verifyChanges(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, report)
 }
 
-// verifyAvailable checks a database is configured - connecting with none configured exits the process
-func verifyAvailable(w http.ResponseWriter) bool {
-	if viper.GetString("dbconn.connstring") == "" {
+// verifyAvailable checks a database is configured to verify against
+func (s *Server) verifyAvailable(w http.ResponseWriter) bool {
+	if s.database == nil {
 		writeError(w, http.StatusServiceUnavailable, "verify_unavailable", "no database is configured to verify against - set dbconn in the config file or SKM_DBCONN_* and restart skima serve", nil)
 		return false
 	}
@@ -542,14 +541,14 @@ func (s *Server) verifyChangeset(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, err)
 		return
 	}
-	if !verifyAvailable(w) {
+	if !s.verifyAvailable(w) {
 		return
 	}
 	baseline, ok := s.resolveBaseline(w, r)
 	if !ok {
 		return
 	}
-	report, err := verify.File(r.Context(), s.workdir, baseline, path)
+	report, err := verify.File(r.Context(), s.database, s.workdir, baseline, path)
 	switch {
 	case errors.As(err, &invalid):
 		writeError(w, http.StatusUnprocessableEntity, "invalid_changeset", name+" is invalid - fix it before verifying", func(e *apiError) { e.Issues = invalid.Issues })

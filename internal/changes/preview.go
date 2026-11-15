@@ -27,11 +27,7 @@ func PreviewSql(workdir string, deltas []Delta) ([]string, error) {
 	if err = os.WriteFile(path, content, 0o644); err != nil {
 		return statements, err
 	}
-	var unit plan.Unit
-	err = plan.InWorkdir(workdir, func() error {
-		unit, _, err = plan.ForChangesetFile(path)
-		return err
-	})
+	unit, _, err := plan.Planner{Workdir: workdir}.ForChangesetFile(path)
 	if err != nil {
 		return statements, err
 	}
