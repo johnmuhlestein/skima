@@ -124,8 +124,8 @@ func schemaFor(kind FileKind) (*jsonschema.Schema, error) {
 	return sch, nil
 }
 
-// KindOf infers a manifest file's kind from its path: *-table.json and *-view.json are state files, and any other
-// .json file in a deltas directory is a changeset
+// KindOf infers a manifest file's kind from its path: *-table.json, *-view.json, *-enum.json, *-sequence.json and
+// *-matview.json are state files, and any other .json file in a deltas directory is a changeset
 func KindOf(path string) (FileKind, bool) {
 	base := filepath.Base(path)
 	switch {

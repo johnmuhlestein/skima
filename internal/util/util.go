@@ -1,3 +1,5 @@
+// Package util holds the small helpers the other packages share: semantic versions (parsing, comparing, the
+// changeset file name for a version), a generic Set, and writing a file atomically
 package util
 
 import (
