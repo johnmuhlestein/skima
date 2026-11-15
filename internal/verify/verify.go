@@ -39,18 +39,18 @@ type Report struct {
 }
 
 // Run verifies the changeset generated for the changes since the baseline
-func Run(ctx context.Context, workdir string, baseline changes.Baseline, draft changes.Draft) (Report, error) {
+func Run(ctx context.Context, database *db.DB, workdir string, baseline changes.Baseline, draft changes.Draft) (Report, error) {
 	diff, err := changes.Diff(workdir, baseline, draft)
 	if err != nil {
 		return Report{}, err
 	}
-	report, err := Deltas(ctx, workdir, baseline, diff.Deltas)
+	report, err := Deltas(ctx, database, workdir, baseline, diff.Deltas)
 	report.Unsupported = diff.Unsupported
 	return report, err
 }
 
 // Deltas verifies a changeset made of the deltas against the baseline
-func Deltas(ctx context.Context, workdir string, baseline changes.Baseline, deltas []changes.Delta) (Report, error) {
+func Deltas(ctx context.Context, database *db.DB, workdir string, baseline changes.Baseline, deltas []changes.Delta) (Report, error) {
 	scratch, err := os.MkdirTemp("", "skima-verify-")
 	if err != nil {
 		return Report{Baseline: baseline, Deltas: len(deltas), Findings: []drift.Finding{}}, err
@@ -64,12 +64,12 @@ func Deltas(ctx context.Context, workdir string, baseline changes.Baseline, delt
 	if err = os.WriteFile(changesetPath, content, 0o644); err != nil {
 		return Report{Baseline: baseline, Deltas: len(deltas), Findings: []drift.Finding{}}, err
 	}
-	return changesetFile(ctx, workdir, baseline, changesetPath, len(deltas))
+	return changesetFile(ctx, database, workdir, baseline, changesetPath, len(deltas))
 }
 
 // File verifies a changeset file - typically the one changeset build wrote, edited by hand to change its intent. The
 // file is validated as apply validates it first: an *changes.InvalidChangesetError lists the problems
-func File(ctx context.Context, workdir string, baseline changes.Baseline, path string) (Report, error) {
+func File(ctx context.Context, database *db.DB, workdir string, baseline changes.Baseline, path string) (Report, error) {
 	rel, err := filepath.Rel(workdir, path)
 	if err != nil {
 		rel = path
@@ -86,14 +86,14 @@ func File(ctx context.Context, workdir string, baseline changes.Baseline, path s
 	if err = json.Unmarshal(content, &changeset); err != nil {
 		return report, err
 	}
-	report, err = changesetFile(ctx, workdir, baseline, path, len(changeset.Deltas))
+	report, err = changesetFile(ctx, database, workdir, baseline, path, len(changeset.Deltas))
 	report.File = rel
 	return report, err
 }
 
 // changesetFile verifies the changeset file against the baseline. The changeset reads its definitions and scripts
 // from the current state files and deltas/scripts, as apply's would
-func changesetFile(ctx context.Context, workdir string, baseline changes.Baseline, changesetPath string, deltas int) (Report, error) {
+func changesetFile(ctx context.Context, database *db.DB, workdir string, baseline changes.Baseline, changesetPath string, deltas int) (Report, error) {
 	report := Report{Baseline: baseline, Deltas: deltas, Findings: []drift.Finding{}}
 	scratch, err := os.MkdirTemp("", "skima-verify-")
 	if err != nil {
@@ -106,30 +106,21 @@ func changesetFile(ctx context.Context, workdir string, baseline changes.Baselin
 	if err = changes.ExportBaselineState(workdir, baseline, baselineDir); err != nil {
 		return report, err
 	}
-	var baselineBuild, changeset, currentBuild plan.Unit
-	err = plan.InWorkdir(baselineDir, func() error {
-		var err error
-		baselineBuild, err = stateBuild()
-		return err
-	})
+	baselineBuild, err := stateBuild(plan.Planner{Workdir: baselineDir})
 	if err != nil {
 		return report, fmt.Errorf("planning the baseline's state build: %w", err)
 	}
-	err = plan.InWorkdir(workdir, func() error {
-		var err error
-		if changeset, _, err = plan.ForChangesetFile(changesetPath); err != nil {
-			return fmt.Errorf("planning the changeset: %w", err)
-		}
-		if currentBuild, err = stateBuild(); err != nil {
-			return fmt.Errorf("planning the current state build: %w", err)
-		}
-		return nil
-	})
+	current := plan.Planner{Workdir: workdir}
+	changeset, _, err := current.ForChangesetFile(changesetPath)
 	if err != nil {
-		return report, err
+		return report, fmt.Errorf("planning the changeset: %w", err)
+	}
+	currentBuild, err := stateBuild(current)
+	if err != nil {
+		return report, fmt.Errorf("planning the current state build: %w", err)
 	}
 
-	afterChangeset, expected, err := db.VerifyChangeset(ctx, baselineBuild, changeset, currentBuild)
+	afterChangeset, expected, err := database.VerifyChangeset(ctx, baselineBuild, changeset, currentBuild)
 	var failed *db.ShadowBuildError
 	if errors.As(err, &failed) && failed.Changeset {
 		// the changeset itself failed - that is the verification's finding, not an error running it
@@ -144,9 +135,9 @@ func changesetFile(ctx context.Context, workdir string, baseline changes.Baselin
 	return report, nil
 }
 
-// stateBuild plans the configured working directory's state build without its post sql files, which load data
-func stateBuild() (plan.Unit, error) {
-	p, err := plan.ForState(true)
+// stateBuild plans the manifest's state build without its post sql files, which load data
+func stateBuild(planner plan.Planner) (plan.Unit, error) {
+	p, err := planner.ForState(true)
 	if err != nil {
 		return plan.Unit{}, err
 	}

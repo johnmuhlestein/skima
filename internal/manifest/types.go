@@ -11,7 +11,7 @@ import (
 // Delta is one change in a changeset
 type Delta interface {
 	// Ddl generates the delta's statement - a *MissingDefinitionError when its definition is not in the state files
-	Ddl() (string, error)
+	Ddl(workdir string) (string, error)
 	StatementType() string
 	Describe() string
 }

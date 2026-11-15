@@ -34,7 +34,7 @@ Example:
 			if table == "" {
 				return evalDeltas(out)
 			}
-			parsed, err := manifest.ParseTableByName(table)
+			parsed, err := manifest.ParseTableByName(workdir(), table)
 			if err != nil {
 				return fmt.Errorf("unable to parse %s: %w", table, err)
 			}

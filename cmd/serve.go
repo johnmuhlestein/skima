@@ -47,10 +47,20 @@ Example:
 			if ip := net.ParseIP(bind); ip == nil || !ip.IsLoopback() {
 				fmt.Fprintf(cmd.ErrOrStderr(), "WARNING: binding to %s - the API has no authentication and anyone who can reach it can edit the state files\n", bind)
 			}
+			// changesets are verified against the configured database - without one, verifying is unavailable
+			opts := server.Options{BaselineRef: baselineRef, CorsOrigin: corsOrigin}
+			if viper.GetString("dbconn.connstring") != "" {
+				database, err := openDB()
+				if err != nil {
+					return err
+				}
+				defer database.Close()
+				opts.Database = database
+			}
 			address := net.JoinHostPort(bind, strconv.Itoa(port))
 			srv := &http.Server{
 				Addr:              address,
-				Handler:           server.New(workdir, server.Options{BaselineRef: baselineRef, CorsOrigin: corsOrigin}),
+				Handler:           server.New(workdir, opts),
 				ReadHeaderTimeout: 10 * time.Second,
 			}
 			listener, err := net.Listen("tcp", address)

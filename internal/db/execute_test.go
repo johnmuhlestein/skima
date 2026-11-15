@@ -11,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/johnmuhlestein/skima/internal/plan"
 	"github.com/johnmuhlestein/skima/internal/util"
-	"github.com/spf13/viper"
 )
 
 // fakeExecer runs no sql - each statement fails with its queued errors in turn, then succeeds
@@ -252,9 +251,7 @@ func TestShadowStatements(t *testing.T) {
 
 // executing a real plan writes the history rows apply always has - and one success row per planned statement
 func TestPlanHistoryRows(t *testing.T) {
-	viper.Set("workdir", "../plan/testdata/manifest")
-	t.Cleanup(func() { viper.Set("workdir", "") })
-	p, err := plan.ForChangesets(util.ExtractVersion("1.0.0"))
+	p, err := plan.Planner{Workdir: "../plan/testdata/manifest"}.ForChangesets(util.ExtractVersion("1.0.0"))
 	if err != nil {
 		t.Fatal(err)
 	}

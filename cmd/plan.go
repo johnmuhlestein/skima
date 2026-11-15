@@ -86,7 +86,7 @@ func runPlan(cmd *cobra.Command, root *rootOptions, opts *planOptions) error {
 		if err = validateFor(cmd, opts.skipValidation, pending, "skima apply would not apply anything", false); err != nil {
 			return err
 		}
-		p, err = plan.ForChangesets(deployed)
+		p, err = planner().ForChangesets(deployed)
 		if err != nil {
 			return fmt.Errorf("unable to plan the apply: %w", err)
 		}
@@ -94,7 +94,7 @@ func runPlan(cmd *cobra.Command, root *rootOptions, opts *planOptions) error {
 		if err = validateFor(cmd, opts.skipValidation, nil, "skima apply would not apply anything", false); err != nil {
 			return err
 		}
-		if p, err = plan.ForState(viper.GetBool("state.transaction")); err != nil {
+		if p, err = planner().ForState(viper.GetBool("state.transaction")); err != nil {
 			return fmt.Errorf("unable to plan the apply: %w", err)
 		}
 	}
@@ -126,7 +126,12 @@ func deployedVersion(ctx context.Context, from string) (util.SemanticVersion, bo
 		}
 		return util.ExtractVersion(from), true, nil
 	}
-	hist, err := db.GetApplyHistory(ctx)
+	database, err := openDB()
+	if err != nil {
+		return util.SemanticVersion{}, false, err
+	}
+	defer database.Close()
+	hist, err := database.GetApplyHistory(ctx)
 	switch {
 	case err == nil:
 		return hist.SchemaVersion, true, nil

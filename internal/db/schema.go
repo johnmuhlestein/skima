@@ -12,7 +12,6 @@ import (
 	"github.com/johnmuhlestein/skima/internal/drift"
 	"github.com/johnmuhlestein/skima/internal/manifest"
 	"github.com/johnmuhlestein/skima/internal/plan"
-	"github.com/spf13/viper"
 )
 
 // querier runs a query - a pooled connection or a transaction
@@ -26,13 +25,13 @@ type querier interface {
 // tables, indexes, constraints, triggers and views are created as temporary objects, and postgres normalizes their definitions exactly
 // as it did the real ones. Pass the state build without its post sql files, which load data. It only needs the TEMP
 // privilege, takes no apply lock and changes nothing
-func ReadSchemas(ctx context.Context, stateBuild plan.Unit) (actual drift.Schema, expected drift.Schema, err error) {
-	conn, err := acquireConn(ctx)
+func (d *DB) ReadSchemas(ctx context.Context, stateBuild plan.Unit) (actual drift.Schema, expected drift.Schema, err error) {
+	conn, err := d.acquireConn(ctx)
 	if err != nil {
 		return actual, expected, err
 	}
 	defer conn.Release()
-	schema := viper.GetString("dbconn.schema")
+	schema := d.cfg.Schema
 
 	var namespace uint32
 	var prefix string // the schema name as postgres prints it in index and trigger definitions
@@ -138,8 +137,8 @@ func shadowBuild(ctx context.Context, conn *pgxpool.Conn, schema string, units .
 // both schemas - if the changeset is right, they are the same. Each is built in a scratch schema created inside a
 // transaction that is always rolled back (see scratchBuild): nothing is changed and no apply lock is taken, but the
 // user needs the CREATE privilege on the database
-func VerifyChangeset(ctx context.Context, baselineBuild plan.Unit, changeset plan.Unit, currentBuild plan.Unit) (afterChangeset drift.Schema, expected drift.Schema, err error) {
-	conn, err := acquireConn(ctx)
+func (d *DB) VerifyChangeset(ctx context.Context, baselineBuild plan.Unit, changeset plan.Unit, currentBuild plan.Unit) (afterChangeset drift.Schema, expected drift.Schema, err error) {
+	conn, err := d.acquireConn(ctx)
 	if err != nil {
 		return afterChangeset, expected, err
 	}

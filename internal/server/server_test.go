@@ -12,13 +12,12 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/spf13/viper"
 )
 
 // fixture commits a copy of the plan fixture manifest to a new git repository and returns a server for it
 func fixture(t *testing.T, opts Options) (*Server, string) {
 	t.Helper()
+	t.Parallel() // nothing is global - each server has its own working directory
 	root := t.TempDir()
 	workdir := filepath.Join(root, "schema")
 	if err := os.CopyFS(workdir, os.DirFS("../plan/testdata/manifest")); err != nil {
@@ -31,8 +30,6 @@ func fixture(t *testing.T, opts Options) (*Server, string) {
 			t.Fatalf("git %v: %s", args, out)
 		}
 	}
-	viper.Set("workdir", workdir) // the SQL preview plans with the configured working directory
-	t.Cleanup(func() { viper.Set("workdir", "") })
 	return New(workdir, opts), workdir
 }
 
@@ -326,13 +323,11 @@ func TestBodyLimit(t *testing.T) {
 
 func TestVerifyNeedsADatabase(t *testing.T) {
 	s, _ := fixture(t, Options{})
-	viper.Set("dbconn.connstring", "")
 	expect(t, call(t, s, "POST", "/api/v1/changes/verify", ""), 503, "verify_unavailable")
 }
 
 func TestVerifyChangesetFile(t *testing.T) {
 	s, workdir := fixture(t, Options{})
-	viper.Set("dbconn.connstring", "")
 	expect(t, call(t, s, "POST", "/api/v1/changesets/v9_9_9.json/verify", ""), 404, "not_found")
 	expect(t, call(t, s, "POST", "/api/v1/changesets/v1_0_3.json/verify", ""), 409, "committed_changeset")
 

@@ -77,7 +77,7 @@ This does the following:
 			if opts.dryRun {
 				return runPlan(cmd, root, &planOptions{skipValidation: opts.skipValidation})
 			}
-			a := &applier{ctx: cmd.Context(), cmd: cmd, out: cmd.OutOrStdout(), errOut: cmd.ErrOrStderr(), skipValidation: opts.skipValidation}
+			a := &applier{ctx: cmd.Context(), planner: planner(), cmd: cmd, out: cmd.OutOrStdout(), errOut: cmd.ErrOrStderr(), skipValidation: opts.skipValidation}
 			return a.apply(opts)
 		},
 	}
@@ -103,6 +103,8 @@ This does the following:
 // applier runs one skima apply: the runs it applies and records
 type applier struct {
 	ctx            context.Context
+	db             *db.DB
+	planner        plan.Planner
 	cmd            *cobra.Command
 	out, errOut    io.Writer
 	skipValidation bool
@@ -126,48 +128,56 @@ func (a *applier) apply(opts *applyOptions) error {
 			// the user defaults to the schema name - set before connecting so the history tables use it too
 			viper.Set("dbconn.username", viper.GetString("dbconn.schema"))
 		}
-		if err := db.Bootstrap(ctx, viper.GetString("dbconn.superuser"), viper.GetString("dbconn.superuserpwd"), a.out); err != nil {
+		if err := db.Bootstrap(ctx, dbConfig(), viper.GetString("dbconn.superuser"), viper.GetString("dbconn.superuserpwd"), a.out); err != nil {
 			return err
 		}
-		unlock, err := db.LockApply(ctx, viper.GetDuration("lock.timeout"), a.out)
+		if err := a.open(); err != nil {
+			return err
+		}
+		defer a.db.Close()
+		unlock, err := a.db.LockApply(ctx, viper.GetDuration("lock.timeout"), a.out)
 		if err != nil {
 			return err
 		}
 		defer unlock()
-		return db.CreateHistTables(ctx, a.out)
+		return a.db.CreateHistTables(ctx, a.out)
 	}
 
+	if err := a.open(); err != nil {
+		return err
+	}
+	defer a.db.Close()
 	// only one apply runs against a schema at a time - a concurrent apply waits here
-	unlock, err := db.LockApply(ctx, viper.GetDuration("lock.timeout"), a.out)
+	unlock, err := a.db.LockApply(ctx, viper.GetDuration("lock.timeout"), a.out)
 	if err != nil {
 		return err
 	}
 	defer unlock()
 	switch {
 	case opts.hist:
-		return db.CreateHistTables(ctx, a.out)
+		return a.db.CreateHistTables(ctx, a.out)
 	case opts.baseline:
-		if err := db.CreateHistTables(ctx, a.out); err != nil {
+		if err := a.db.CreateHistTables(ctx, a.out); err != nil {
 			return err
 		}
-		run, err := db.InitializeHistory(ctx, util.ExtractVersion(opts.baselineVersion), "baseline", "")
+		run, err := a.db.InitializeHistory(ctx, util.ExtractVersion(opts.baselineVersion), "baseline", "")
 		if err != nil {
 			return err
 		}
 		run.Status = "success"
-		return db.FinalizeHistory(ctx, &run)
+		return a.db.FinalizeHistory(ctx, &run)
 	case opts.stateSql:
-		p, err := plan.ForStateSql(viper.GetBool("state.transaction"))
+		p, err := a.planner.ForStateSql(viper.GetBool("state.transaction"))
 		if err != nil {
 			return planError(err)
 		}
-		if err = a.applyUnit(p.Units[0], manifest.Version(), "sql", ""); err != nil {
+		if err = a.applyUnit(p.Units[0], manifest.Version(a.planner.Workdir), "sql", ""); err != nil {
 			return err
 		}
 		return a.result()
 	}
 
-	hist, err := db.GetApplyHistory(ctx)
+	hist, err := a.db.GetApplyHistory(ctx)
 	switch {
 	case err == nil:
 		fmt.Fprintf(a.out, "Version %s is currently deployed - checking for a more current version to deploy\n", hist.SchemaVersion.String())
@@ -187,13 +197,13 @@ func (a *applier) apply(opts *applyOptions) error {
 		if err := a.validate(nil); err != nil {
 			return err
 		}
-		p, err := plan.ForState(viper.GetBool("state.transaction"))
+		p, err := a.planner.ForState(viper.GetBool("state.transaction"))
 		if err != nil {
 			return planError(err)
 		}
 		if noHistTables {
 			fmt.Fprintln(a.out, "Schema is not yet managed by skima - creating the history tables")
-			if err := db.CreateHistTables(ctx, a.out); err != nil {
+			if err := a.db.CreateHistTables(ctx, a.out); err != nil {
 				return err
 			}
 			fmt.Fprintln(a.out, "Applying the state definitions")
@@ -207,7 +217,7 @@ func (a *applier) apply(opts *applyOptions) error {
 		return fmt.Errorf("unable to retrieve the apply history: %w", err)
 	}
 	if ctx.Err() == nil {
-		hist, err := db.GetApplyHistory(ctx)
+		hist, err := a.db.GetApplyHistory(ctx)
 		switch {
 		case err == nil:
 			fmt.Fprintf(a.out, "Last successfully completed version: %s on %s\n", hist.SchemaVersion.String(), hist.CompletionTimestamp.String())
@@ -218,6 +228,16 @@ func (a *applier) apply(opts *applyOptions) error {
 		}
 	}
 	return a.result()
+}
+
+// open opens the configured database
+func (a *applier) open() error {
+	database, err := openDB()
+	if err != nil {
+		return err
+	}
+	a.db = database
+	return nil
 }
 
 // result is the apply's outcome once its runs are applied - interrupted, failed or a success
@@ -245,7 +265,7 @@ func planError(err error) error {
 // applyChangesets plans the changesets newer than the deployed version and applies them in order, each as its own
 // run, stopping at the first that fails
 func (a *applier) applyChangesets(deployed util.SemanticVersion) error {
-	p, err := plan.ForChangesets(deployed)
+	p, err := a.planner.ForChangesets(deployed)
 	if err != nil {
 		return planError(err)
 	}
@@ -268,7 +288,7 @@ func (a *applier) applyChangesets(deployed util.SemanticVersion) error {
 // applyUnit records a run for the planned unit, applies it, then reports and records its outcome. An error means the
 // run could not be recorded; the unit's failures are counted in a.failures
 func (a *applier) applyUnit(unit plan.Unit, version util.SemanticVersion, applyType string, file string) error {
-	run, err := db.InitializeHistory(a.ctx, version, applyType, file)
+	run, err := a.db.InitializeHistory(a.ctx, version, applyType, file)
 	if err != nil {
 		return err
 	}
@@ -278,7 +298,7 @@ func (a *applier) applyUnit(unit plan.Unit, version util.SemanticVersion, applyT
 	case "state":
 		fmt.Fprintf(a.out, "Executing state files as run: %d\n", run.RunId)
 	}
-	failures, err := db.ApplyUnit(a.ctx, &run, unit, a.out, a.errOut)
+	failures, err := a.db.ApplyUnit(a.ctx, &run, unit, a.out, a.errOut)
 	if err != nil {
 		fmt.Fprintln(a.errOut, "ERROR:", err)
 	}
@@ -296,5 +316,5 @@ func (a *applier) applyUnit(unit plan.Unit, version util.SemanticVersion, applyT
 		run.Status = "success"
 	}
 	a.failures += failures
-	return db.FinalizeHistory(a.ctx, &run)
+	return a.db.FinalizeHistory(a.ctx, &run)
 }

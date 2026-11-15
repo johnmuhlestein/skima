@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/johnmuhlestein/skima/internal/util"
-	"github.com/spf13/viper"
 )
 
 func writeManifest(t *testing.T, files map[string]string) string {
@@ -138,8 +137,6 @@ func TestChangesetReferences(t *testing.T) {
 			{"object":"table","action":"drop","name":"t","post":{"script":"after.sql"}}]}`,
 	}
 	workdir := writeManifest(t, files)
-	viper.Set("workdir", workdir) // function adds resolve files in the workdir
-	t.Cleanup(func() { viper.Set("workdir", "") })
 
 	broken := []string{
 		"/deltas/0/name: table 'accounts' has no valid state file",
@@ -250,10 +247,8 @@ func TestFunctionFileLookup(t *testing.T) {
 		"state/sql/both.sql":     "from sql",
 		"state/sql/legacy.sql":   "legacy location",
 	})
-	viper.Set("workdir", workdir)
-	t.Cleanup(func() { viper.Set("workdir", "") })
 	for name, expected := range map[string]string{"both": "from pre", "legacy": "legacy location"} {
-		ddl := mustDdl(t, SimpleDelta{Object: "function", Action: "add", Name: name})
+		ddl := mustDdl(t, workdir, SimpleDelta{Object: "function", Action: "add", Name: name})
 		if ddl != expected {
 			t.Errorf("function %s - EXPECTED: %q  ACTUAL: %q", name, expected, ddl)
 		}

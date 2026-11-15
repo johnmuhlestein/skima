@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/johnmuhlestein/skima/internal/util"
-	"github.com/spf13/viper"
 )
 
 // osReader reads files - a seam the tests replace with fixtures
@@ -126,8 +125,8 @@ func ParseChangeSet(path string) (ChangeSet, error) {
 
 // Version returns a SemanticVersion for the manifest based on
 // the delta files in the manifest
-func Version() util.SemanticVersion {
-	deltaFilePaths, _ := ListFiles(filepath.Join(viper.GetString("workdir"), "deltas"), "json")
+func Version(workdir string) util.SemanticVersion {
+	deltaFilePaths, _ := ListFiles(filepath.Join(workdir, "deltas"), "json")
 	if len(deltaFilePaths) == 0 {
 		return util.ExtractVersion("1.0.0")
 	}
@@ -143,14 +142,14 @@ func Version() util.SemanticVersion {
 
 // ParseTableByName reads the table's state file from the configured working directory - or, for skima's history
 // tables, their embedded definitions
-func ParseTableByName(name string) (Table, error) {
+func ParseTableByName(workdir string, name string) (Table, error) {
 	switch name {
 	case "skima_schema_history":
 		return parseTable(SkimaSchemaHistoryTable)
 	case "skima_schema_statements":
 		return parseTable(SkimaSchemaStatementsTable)
 	default:
-		path := filepath.Join(viper.GetString("workdir"), "state", fmt.Sprintf("%s-table.json", name))
+		path := filepath.Join(workdir, "state", fmt.Sprintf("%s-table.json", name))
 		return ParseTableByPath(path)
 	}
 }
@@ -165,8 +164,8 @@ func ParseTableByPath(path string) (Table, error) {
 }
 
 // ParseEnumByName reads the enum's state file from the configured working directory
-func ParseEnumByName(name string) (Enum, error) {
-	path := filepath.Join(viper.GetString("workdir"), "state", fmt.Sprintf("%s-enum.json", name))
+func ParseEnumByName(workdir string, name string) (Enum, error) {
+	path := filepath.Join(workdir, "state", fmt.Sprintf("%s-enum.json", name))
 	return ParseEnumByPath(path)
 }
 
@@ -182,8 +181,8 @@ func ParseEnumByPath(path string) (Enum, error) {
 }
 
 // ParseSequenceByName reads the sequence's state file from the configured working directory
-func ParseSequenceByName(name string) (Sequence, error) {
-	path := filepath.Join(viper.GetString("workdir"), "state", fmt.Sprintf("%s-sequence.json", name))
+func ParseSequenceByName(workdir string, name string) (Sequence, error) {
+	path := filepath.Join(workdir, "state", fmt.Sprintf("%s-sequence.json", name))
 	return ParseSequenceByPath(path)
 }
 
@@ -199,8 +198,8 @@ func ParseSequenceByPath(path string) (Sequence, error) {
 }
 
 // ParseMatviewByName reads the materialized view's state file from the configured working directory
-func ParseMatviewByName(name string) (Matview, error) {
-	path := filepath.Join(viper.GetString("workdir"), "state", fmt.Sprintf("%s-matview.json", name))
+func ParseMatviewByName(workdir string, name string) (Matview, error) {
+	path := filepath.Join(workdir, "state", fmt.Sprintf("%s-matview.json", name))
 	return ParseMatviewByPath(path)
 }
 
@@ -216,8 +215,8 @@ func ParseMatviewByPath(path string) (Matview, error) {
 }
 
 // ParseViewByName reads the view's state file from the configured working directory
-func ParseViewByName(name string) (View, error) {
-	path := filepath.Join(viper.GetString("workdir"), "state", fmt.Sprintf("%s-view.json", name))
+func ParseViewByName(workdir string, name string) (View, error) {
+	path := filepath.Join(workdir, "state", fmt.Sprintf("%s-view.json", name))
 	return ParseViewByPath(path)
 }
 
@@ -260,19 +259,19 @@ func ListFiles(path string, sfx string) ([]string, error) {
 }
 
 // referenceIndexes returns the indexes of the reference table - or materialized view, when it has a state file instead
-func (sd SimpleDelta) referenceIndexes() ([]Index, error) {
-	t, err := sd.referenceTable()
+func (sd SimpleDelta) referenceIndexes(workdir string) ([]Index, error) {
+	t, err := sd.referenceTable(workdir)
 	if err == nil {
 		return t.Indexes, nil
 	}
-	if mv, mvErr := ParseMatviewByName(sd.Reference); mvErr == nil {
+	if mv, mvErr := ParseMatviewByName(workdir, sd.Reference); mvErr == nil {
 		return mv.Indexes, nil
 	}
 	return nil, err
 }
 
-func (sd SimpleDelta) referenceTable() (Table, error) {
-	t, err := ParseTableByName(sd.Reference)
+func (sd SimpleDelta) referenceTable(workdir string) (Table, error) {
+	t, err := ParseTableByName(workdir, sd.Reference)
 	if err != nil {
 		return t, fmt.Errorf("unable to parse the reference table %s: %w", sd.Reference, err)
 	}
@@ -281,9 +280,9 @@ func (sd SimpleDelta) referenceTable() (Table, error) {
 
 // FunctionFile returns the sql file a function add delta runs - the first of FunctionFilePaths that exists. When none
 // can be read it returns the error reading the last of them
-func (sd SimpleDelta) FunctionFile() (string, error) {
+func (sd SimpleDelta) FunctionFile(workdir string) (string, error) {
 	var err error
-	for _, path := range FunctionFilePaths(viper.GetString("workdir"), sd.Name) {
+	for _, path := range FunctionFilePaths(workdir, sd.Name) {
 		if _, err = reader.readFile(path); err == nil {
 			return path, nil
 		}
@@ -306,8 +305,8 @@ func ScriptPath(workdir string, script string) string {
 }
 
 // readScript reads a script file, returning an error if it is missing or empty - applying it would fail
-func readScript(script string) (string, error) {
-	dat, err := reader.readFile(ScriptPath(viper.GetString("workdir"), script))
+func readScript(workdir string, script string) (string, error) {
+	dat, err := reader.readFile(ScriptPath(workdir, script))
 	if err != nil {
 		return "", fmt.Errorf("unable to read the script %s: %w", script, err)
 	}
@@ -318,9 +317,9 @@ func readScript(script string) (string, error) {
 }
 
 // Statements returns every statement the delta runs - its sql, or the contents of its script file as one statement
-func (sd SqlDelta) Statements() ([]string, error) {
+func (sd SqlDelta) Statements(workdir string) ([]string, error) {
 	if len(sd.Script) > 0 {
-		script, err := readScript(sd.Script)
+		script, err := readScript(workdir, sd.Script)
 		if err != nil {
 			return nil, err
 		}
@@ -330,12 +329,12 @@ func (sd SqlDelta) Statements() ([]string, error) {
 }
 
 // Statements returns the hook's sql, or the contents of its script file as one statement when it has no sql
-func (hook Hook) Statements() ([]string, error) {
+func (hook Hook) Statements(workdir string) ([]string, error) {
 	if len(hook.Sql) > 0 {
 		return hook.Sql, nil
 	}
 	if len(hook.Script) > 0 {
-		script, err := readScript(hook.Script)
+		script, err := readScript(workdir, hook.Script)
 		if err != nil {
 			return nil, err
 		}

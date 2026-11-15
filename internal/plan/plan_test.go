@@ -11,7 +11,6 @@ import (
 
 	"github.com/johnmuhlestein/skima/internal/manifest"
 	"github.com/johnmuhlestein/skima/internal/util"
-	"github.com/spf13/viper"
 )
 
 // go test ./internal/plan -update rewrites the golden files from the current output
@@ -19,14 +18,11 @@ var update = flag.Bool("update", false, "rewrite the golden files")
 
 const fixture = "testdata/manifest"
 
-func useManifest(t *testing.T, workdir string) {
+// useManifest plans the manifest in workdir for schema app1. Nothing is global, so the tests run in parallel
+func useManifest(t *testing.T, workdir string) Planner {
 	t.Helper()
-	viper.Set("workdir", workdir)
-	viper.Set("dbconn.schema", "app1")
-	t.Cleanup(func() {
-		viper.Set("workdir", "")
-		viper.Set("dbconn.schema", "")
-	})
+	t.Parallel()
+	return Planner{Workdir: workdir, Schema: "app1"}
 }
 
 // golden compares the output with testdata/golden/<name>, or rewrites it with -update
@@ -67,8 +63,8 @@ func renderJSON(t *testing.T, p Plan) []byte {
 }
 
 func TestStatePlan(t *testing.T) {
-	useManifest(t, fixture)
-	p, err := ForState(true)
+	pl := useManifest(t, fixture)
+	p, err := pl.ForState(true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,8 +86,8 @@ func TestStatePlan(t *testing.T) {
 }
 
 func TestStatePlanWithoutTransaction(t *testing.T) {
-	useManifest(t, fixture)
-	p, err := ForState(false)
+	pl := useManifest(t, fixture)
+	p, err := pl.ForState(false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,8 +97,8 @@ func TestStatePlanWithoutTransaction(t *testing.T) {
 }
 
 func TestChangesetPlan(t *testing.T) {
-	useManifest(t, fixture)
-	p, err := ForChangesets(util.ExtractVersion("1.0.0"))
+	pl := useManifest(t, fixture)
+	p, err := pl.ForChangesets(util.ExtractVersion("1.0.0"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,8 +123,8 @@ func TestChangesetPlan(t *testing.T) {
 }
 
 func TestChangesetPlanFromLaterVersion(t *testing.T) {
-	useManifest(t, fixture)
-	p, err := ForChangesets(util.ExtractVersion("1.0.2"))
+	pl := useManifest(t, fixture)
+	p, err := pl.ForChangesets(util.ExtractVersion("1.0.2"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,8 +134,8 @@ func TestChangesetPlanFromLaterVersion(t *testing.T) {
 }
 
 func TestUpToDatePlan(t *testing.T) {
-	useManifest(t, fixture)
-	p, err := ForChangesets(util.ExtractVersion("1.0.3"))
+	pl := useManifest(t, fixture)
+	p, err := pl.ForChangesets(util.ExtractVersion("1.0.3"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,12 +165,12 @@ const notesTable = `{"name":"notes","columns":[{"name":"id","datatype":"uuid","n
 
 // a delta whose definition is not in the state files generates no DDL - apply skips it and does not run its post hook
 func TestSkippedDelta(t *testing.T) {
-	useManifest(t, writeManifest(t, map[string]string{
+	pl := useManifest(t, writeManifest(t, map[string]string{
 		"state/notes-table.json": notesTable,
 		"deltas/v1_0_1.json": `{"deltas":[{"object":"column","action":"add","name":"body","reference":"notes",
 			"pre":{"sql":["select 1"]},"post":{"sql":["select 2"]}}]}`,
 	}))
-	p, err := ForChangesets(util.ExtractVersion("1.0.0"))
+	p, err := pl.ForChangesets(util.ExtractVersion("1.0.0"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,11 +191,11 @@ func TestSkippedDelta(t *testing.T) {
 
 // apply fails on a missing script, so the plan does too - naming the delta
 func TestMissingScript(t *testing.T) {
-	useManifest(t, writeManifest(t, map[string]string{
+	pl := useManifest(t, writeManifest(t, map[string]string{
 		"state/notes-table.json": notesTable,
 		"deltas/v1_0_1.json":     `{"deltas":[{"object":"script","description":"backfill","script":"missing.sql"}]}`,
 	}))
-	_, err := ForChangesets(util.ExtractVersion("1.0.0"))
+	_, err := pl.ForChangesets(util.ExtractVersion("1.0.0"))
 	if err == nil || !strings.Contains(err.Error(), "deltas/v1_0_1.json#/deltas/0") || !strings.Contains(err.Error(), "missing.sql") {
 		t.Errorf("EXPECTED an error naming the delta and the script  ACTUAL: %v", err)
 	}
@@ -207,19 +203,19 @@ func TestMissingScript(t *testing.T) {
 
 // a table delta whose state file is missing panics in apply - the plan reports it as an error instead
 func TestMissingTableDefinition(t *testing.T) {
-	useManifest(t, writeManifest(t, map[string]string{
+	pl := useManifest(t, writeManifest(t, map[string]string{
 		"state/notes-table.json": notesTable,
 		"deltas/v1_0_1.json":     `{"deltas":[{"object":"index","action":"add","name":"x_idx","reference":"absent"}]}`,
 	}))
-	_, err := ForChangesets(util.ExtractVersion("1.0.0"))
+	_, err := pl.ForChangesets(util.ExtractVersion("1.0.0"))
 	if err == nil || !strings.Contains(err.Error(), "unable to parse the reference table absent") {
 		t.Errorf("EXPECTED an error about the missing table  ACTUAL: %v", err)
 	}
 }
 
 func TestNoChangesetsStateVersion(t *testing.T) {
-	useManifest(t, writeManifest(t, map[string]string{"state/notes-table.json": notesTable}))
-	p, err := ForState(true)
+	pl := useManifest(t, writeManifest(t, map[string]string{"state/notes-table.json": notesTable}))
+	p, err := pl.ForState(true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,8 +266,8 @@ func TestDeltaTolerates(t *testing.T) {
 
 // drift builds the state files without the post sql files, which load data
 func TestWithoutPostSql(t *testing.T) {
-	useManifest(t, fixture)
-	p, err := ForState(true)
+	pl := useManifest(t, fixture)
+	p, err := pl.ForState(true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +285,7 @@ func TestWithoutPostSql(t *testing.T) {
 // an added view or column is created as its state file describes, comment included - a column added from an
 // explicit definition takes the definition's comment
 func TestAddedComments(t *testing.T) {
-	useManifest(t, writeManifest(t, map[string]string{
+	pl := useManifest(t, writeManifest(t, map[string]string{
 		"state/notes-table.json": `{"name":"notes","columns":[{"name":"id","datatype":"uuid"},{"name":"body","datatype":"text","comment":"The note"}]}`,
 		"state/recent-view.json": `{"name":"recent","columns":["id"],"sql":"select id from notes","comment":"Latest notes"}`,
 		"deltas/v1_0_1.json": `{"deltas":[
@@ -298,7 +294,7 @@ func TestAddedComments(t *testing.T) {
 			{"object":"view","action":"add","name":"recent","post":{"sql":["select 1"]}}
 		]}`,
 	}))
-	p, err := ForChangesets(util.ExtractVersion("1.0.0"))
+	p, err := pl.ForChangesets(util.ExtractVersion("1.0.0"))
 	if err != nil {
 		t.Fatal(err)
 	}

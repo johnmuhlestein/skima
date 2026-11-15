@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/johnmuhlestein/skima/internal/util"
-	"github.com/spf13/viper"
 )
 
 func int64p(n int64) *int64 { return &n }
@@ -31,10 +30,9 @@ func TestSequenceDdl(t *testing.T) {
 
 func TestSequenceDelta(t *testing.T) {
 	reader = osReadWrapper{}
-	viper.Set("workdir", writeManifest(t, map[string]string{
+	workdir := writeManifest(t, map[string]string{
 		"state/invoice_no-sequence.json": `{"name":"invoice_no","start":1000,"increment":5,"ownedby":"invoices.number","comment":"Invoice numbers"}`,
-	}))
-	t.Cleanup(func() { viper.Set("workdir", "") })
+	})
 	cases := []struct {
 		delta    SimpleDelta
 		expected string
@@ -45,11 +43,11 @@ func TestSequenceDelta(t *testing.T) {
 		{SimpleDelta{Object: "comment", Action: "add", On: "sequence", Name: "invoice_no"}, "comment on sequence invoice_no is 'Invoice numbers'"},
 	}
 	for _, c := range cases {
-		if ddl, err := c.delta.Ddl(); err != nil || ddl != c.expected {
+		if ddl, err := c.delta.Ddl(workdir); err != nil || ddl != c.expected {
 			t.Errorf("%s: EXPECTED %s  ACTUAL: %s, %v", c.delta.Describe(), c.expected, ddl, err)
 		}
 	}
-	if _, err := (SimpleDelta{Object: "sequence", Action: "alter", Name: "absent"}).Ddl(); err == nil {
+	if _, err := (SimpleDelta{Object: "sequence", Action: "alter", Name: "absent"}).Ddl(workdir); err == nil {
 		t.Error("EXPECTED an error for a sequence without a state file")
 	}
 }
@@ -71,8 +69,6 @@ func TestSequenceValidation(t *testing.T) {
 		]}`,
 		"deltas/v1_0_2.json": `{"deltas":[{"object":"sequence","action":"restart","name":"invoice_no","value":"1"}]}`,
 	})
-	viper.Set("workdir", workdir)
-	t.Cleanup(func() { viper.Set("workdir", "") })
 	since := util.ExtractVersion("1.0.0")
 	results, err := ValidateManifest(workdir, &since)
 	if err != nil {

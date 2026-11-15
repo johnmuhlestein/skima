@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/johnmuhlestein/skima/internal/changes"
+	"github.com/johnmuhlestein/skima/internal/db"
 	"github.com/johnmuhlestein/skima/internal/editor"
 )
 
@@ -23,6 +24,7 @@ type Server struct {
 	workdir     string
 	baselineRef string
 	corsOrigin  string
+	database    *db.DB
 	editor      *editor.Editor
 	// draftMu serializes changes to the draft's hints
 	draftMu sync.Mutex
@@ -37,11 +39,13 @@ type Options struct {
 	BaselineRef string
 	// CorsOrigin is an origin allowed to call the API from a browser (e.g. a UI dev server) - empty for none
 	CorsOrigin string
+	// Database is what changesets are verified against - nil when none is configured, and verifying is unavailable
+	Database *db.DB
 }
 
 // New returns the API handler for the state files in workdir
 func New(workdir string, opts Options) *Server {
-	s := &Server{workdir: workdir, baselineRef: opts.BaselineRef, corsOrigin: opts.CorsOrigin, editor: editor.New(workdir), mux: http.NewServeMux()}
+	s := &Server{workdir: workdir, baselineRef: opts.BaselineRef, corsOrigin: opts.CorsOrigin, database: opts.Database, editor: editor.New(workdir), mux: http.NewServeMux()}
 	s.routes()
 	return s
 }

@@ -216,7 +216,7 @@ func (cons Constraint) GenerateDdl(tableName string) string {
 }
 
 // Ddl generates the foreign key delta's statement from its own definition
-func (fk FkDelta) Ddl() (string, error) {
+func (fk FkDelta) Ddl(workdir string) (string, error) {
 	return fk.Definition.AlterStmt(fk.Tablename, fk.Action), nil
 }
 
@@ -231,11 +231,11 @@ func (fk FkDelta) Describe() string {
 }
 
 // Ddl generates the delta's statement, returning an error if the reference table's state file cannot be read
-func (col ColumnDelta) Ddl() (string, error) {
+func (col ColumnDelta) Ddl(workdir string) (string, error) {
 	if col.Definition.Name != "" {
 		return col.Definition.AlterStmt(col.Reference, col.Action), nil
 	}
-	refTable, err := ParseTableByName(col.Reference)
+	refTable, err := ParseTableByName(workdir, col.Reference)
 	var refColumn Column
 	var defaultString string
 	if err != nil {
@@ -290,12 +290,12 @@ func missingDefinition(format string, args ...any) error {
 // Ddl generates the delta's statement. It returns a *MissingDefinitionError when the definition it reads from the state
 // files is not there, and other errors when a state or sql file cannot be read. An object/action skima does not
 // support generates an empty statement and no error
-func (sd SimpleDelta) Ddl() (string, error) {
+func (sd SimpleDelta) Ddl(workdir string) (string, error) {
 	switch sd.Object {
 	case "table":
 		switch sd.Action {
 		case "add":
-			t, err := ParseTableByName(sd.Name)
+			t, err := ParseTableByName(workdir, sd.Name)
 			if err != nil {
 				return "", fmt.Errorf("unable to parse the table %s: %w", sd.Name, err)
 			}
@@ -306,7 +306,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 	case "view":
 		switch sd.Action {
 		case "add":
-			v, err := ParseViewByName(sd.Name)
+			v, err := ParseViewByName(workdir, sd.Name)
 			if err != nil {
 				return "", fmt.Errorf("unable to parse the view %s: %w", sd.Name, err)
 			}
@@ -324,7 +324,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 			if len(sd.Reference) == 0 {
 				return "", missingDefinition("cannot add column %s as a simple delta without a reference value", sd.Name)
 			}
-			t, err := sd.referenceTable()
+			t, err := sd.referenceTable(workdir)
 			if err != nil {
 				return "", err
 			}
@@ -341,7 +341,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 			return fmt.Sprintf(dropFkTmpl, QuoteIdent(sd.Reference), QuoteIdent(sd.Name)), nil
 		case "add":
 			if len(sd.Reference) > 0 {
-				t, err := sd.referenceTable()
+				t, err := sd.referenceTable(workdir)
 				if err != nil {
 					return "", err
 				}
@@ -359,7 +359,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 			return fmt.Sprintf(dropFkTmpl, QuoteIdent(sd.Reference), QuoteIdent(sd.Name)), nil
 		case "add":
 			if len(sd.Reference) > 0 {
-				t, err := sd.referenceTable()
+				t, err := sd.referenceTable(workdir)
 				if err != nil {
 					return "", err
 				}
@@ -375,7 +375,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 			return fmt.Sprintf(dropTriggerTmpl, QuoteIdent(sd.Name), QuoteIdent(sd.Reference)), nil
 		case "add":
 			if len(sd.Reference) > 0 {
-				t, err := sd.referenceTable()
+				t, err := sd.referenceTable(workdir)
 				if err != nil {
 					return "", err
 				}
@@ -392,7 +392,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 		case "drop":
 			return fmt.Sprintf("drop function if exists %s", sd.Name), nil
 		case "add":
-			path, err := sd.FunctionFile()
+			path, err := sd.FunctionFile(workdir)
 			if err != nil {
 				return "", err
 			}
@@ -408,7 +408,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 			return fmt.Sprintf(dropIndexTmpl, QuoteIdent(sd.Name)), nil
 		case "add":
 			if len(sd.Reference) > 0 {
-				indexes, err := sd.referenceIndexes()
+				indexes, err := sd.referenceIndexes(workdir)
 				if err != nil {
 					return "", err
 				}
@@ -430,7 +430,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 			}
 			return fmt.Sprintf("refresh materialized view %s", QuoteIdent(sd.Name)), nil
 		case "add":
-			mv, err := ParseMatviewByName(sd.Name)
+			mv, err := ParseMatviewByName(workdir, sd.Name)
 			if err != nil {
 				return "", fmt.Errorf("unable to parse the materialized view %s: %w", sd.Name, err)
 			}
@@ -441,7 +441,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 		case "drop":
 			return fmt.Sprintf("drop type if exists %s", QuoteIdent(sd.Name)), nil
 		case "add", "alter":
-			e, err := ParseEnumByName(sd.Name)
+			e, err := ParseEnumByName(workdir, sd.Name)
 			if err != nil {
 				return "", fmt.Errorf("unable to parse the enum %s: %w", sd.Name, err)
 			}
@@ -458,7 +458,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 		case "drop":
 			return fmt.Sprintf("drop sequence if exists %s", QuoteIdent(sd.Name)), nil
 		case "add", "alter":
-			seq, err := ParseSequenceByName(sd.Name)
+			seq, err := ParseSequenceByName(workdir, sd.Name)
 			if err != nil {
 				return "", fmt.Errorf("unable to parse the sequence %s: %w", sd.Name, err)
 			}
@@ -471,7 +471,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 		if sd.Action == "drop" {
 			return CommentDdl(sd.On, sd.commentTarget(), ""), nil
 		}
-		comment, err := sd.stateComment()
+		comment, err := sd.stateComment(workdir)
 		if err != nil {
 			return "", err
 		}
@@ -482,7 +482,7 @@ func (sd SimpleDelta) Ddl() (string, error) {
 			return fmt.Sprintf("alter table %s drop constraint if exists %s", QuoteIdent(sd.Reference), QuoteIdent(sd.Name)), nil
 		case "add":
 			if len(sd.Reference) > 0 {
-				t, err := sd.referenceTable()
+				t, err := sd.referenceTable(workdir)
 				if err != nil {
 					return "", err
 				}
@@ -507,17 +507,17 @@ func (sd SimpleDelta) commentTarget() string {
 }
 
 // stateComment reads the comment a comment delta sets from the state files
-func (sd SimpleDelta) stateComment() (string, error) {
+func (sd SimpleDelta) stateComment(workdir string) (string, error) {
 	var comment string
 	switch sd.On {
 	case "table":
-		t, err := ParseTableByName(sd.Name)
+		t, err := ParseTableByName(workdir, sd.Name)
 		if err != nil {
 			return "", fmt.Errorf("unable to parse the table %s: %w", sd.Name, err)
 		}
 		comment = t.Comment
 	case "column":
-		t, err := sd.referenceTable()
+		t, err := sd.referenceTable(workdir)
 		if err != nil {
 			return "", err
 		}
@@ -527,25 +527,25 @@ func (sd SimpleDelta) stateComment() (string, error) {
 		}
 		comment = col.Comment
 	case "view":
-		v, err := ParseViewByName(sd.Name)
+		v, err := ParseViewByName(workdir, sd.Name)
 		if err != nil {
 			return "", fmt.Errorf("unable to parse the view %s: %w", sd.Name, err)
 		}
 		comment = v.Comment
 	case "enum":
-		e, err := ParseEnumByName(sd.Name)
+		e, err := ParseEnumByName(workdir, sd.Name)
 		if err != nil {
 			return "", fmt.Errorf("unable to parse the enum %s: %w", sd.Name, err)
 		}
 		comment = e.Comment
 	case "sequence":
-		seq, err := ParseSequenceByName(sd.Name)
+		seq, err := ParseSequenceByName(workdir, sd.Name)
 		if err != nil {
 			return "", fmt.Errorf("unable to parse the sequence %s: %w", sd.Name, err)
 		}
 		comment = seq.Comment
 	case "matview":
-		mv, err := ParseMatviewByName(sd.Name)
+		mv, err := ParseMatviewByName(workdir, sd.Name)
 		if err != nil {
 			return "", fmt.Errorf("unable to parse the materialized view %s: %w", sd.Name, err)
 		}
@@ -623,9 +623,9 @@ func (sd SqlDelta) StatementType() string {
 
 // Ddl returns the script delta's first statement, or its script file's contents - plan uses Statements for every
 // statement
-func (sd SqlDelta) Ddl() (string, error) {
+func (sd SqlDelta) Ddl(workdir string) (string, error) {
 	if len(sd.Script) > 0 {
-		return readScript(sd.Script)
+		return readScript(workdir, sd.Script)
 	}
 	if len(sd.Sql) == 0 {
 		return "", missingDefinition("the script delta %q has no sql or script", sd.Description)

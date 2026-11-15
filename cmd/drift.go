@@ -9,7 +9,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/johnmuhlestein/skima/internal/db"
 	"github.com/johnmuhlestein/skima/internal/drift"
-	"github.com/johnmuhlestein/skima/internal/plan"
 	"github.com/johnmuhlestein/skima/internal/util"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -62,7 +61,12 @@ Example:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			report := drift.Report{Schema: viper.GetString("dbconn.schema")}
-			hist, err := db.GetApplyHistory(ctx)
+			database, err := openDB()
+			if err != nil {
+				return err
+			}
+			defer database.Close()
+			hist, err := database.GetApplyHistory(ctx)
 			switch {
 			case err == nil:
 				report.Deployed = hist.SchemaVersion.String()
@@ -82,11 +86,11 @@ Example:
 			if err = validateFor(cmd, skipValidation, nil, "drift cannot be checked", false); err != nil {
 				return err
 			}
-			p, err := plan.ForState(true)
+			p, err := planner().ForState(true)
 			if err != nil {
 				return fmt.Errorf("unable to read the state files: %w", err)
 			}
-			actual, expected, err := db.ReadSchemas(ctx, p.Units[0].WithoutPostSql())
+			actual, expected, err := database.ReadSchemas(ctx, p.Units[0].WithoutPostSql())
 			if err != nil {
 				return err
 			}
