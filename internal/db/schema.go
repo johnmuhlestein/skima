@@ -26,13 +26,12 @@ type querier interface {
 // tables, indexes, constraints, triggers and views are created as temporary objects, and postgres normalizes their definitions exactly
 // as it did the real ones. Pass the state build without its post sql files, which load data. It only needs the TEMP
 // privilege, takes no apply lock and changes nothing
-func ReadSchemas(stateBuild plan.Unit) (actual drift.Schema, expected drift.Schema, err error) {
-	conn := acquireConn()
-	if conn == nil {
-		return actual, expected, errors.New("unable to connect to the database")
+func ReadSchemas(ctx context.Context, stateBuild plan.Unit) (actual drift.Schema, expected drift.Schema, err error) {
+	conn, err := acquireConn(ctx)
+	if err != nil {
+		return actual, expected, err
 	}
 	defer conn.Release()
-	ctx := context.Background()
 	schema := viper.GetString("dbconn.schema")
 
 	var namespace uint32
@@ -78,7 +77,7 @@ func shadowBuild(ctx context.Context, conn *pgxpool.Conn, schema string, units .
 	if err != nil {
 		return built, err
 	}
-	defer tx.Rollback(ctx) // always - the shadow build is only read
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }() // always - the shadow build is only read
 	// lock_timeout guards against a sql file or script waiting on a lock held by the application
 	_, err = tx.Exec(ctx, "select set_config('search_path', $1, true), set_config('lock_timeout', '10s', true)", "pg_temp, "+pgx.Identifier{schema}.Sanitize())
 	if err != nil {
@@ -86,7 +85,7 @@ func shadowBuild(ctx context.Context, conn *pgxpool.Conn, schema string, units .
 	}
 	for _, unit := range units {
 		var failures strings.Builder
-		shadow := executor{ex: savepointExecer{tx: tx, optOut: "it cannot be compared"}, record: noRecord, history: &ApplyHistory{}, out: io.Discard, errOut: &failures,
+		shadow := executor{ctx: ctx, ex: savepointExecer{tx: tx, optOut: "it cannot be compared"}, record: noRecord, history: &ApplyHistory{}, out: io.Discard, errOut: &failures,
 			shadow: true}
 		if shadow.run(unit.Steps) > 0 {
 			// nothing is recorded, so the statement ids in the messages mean nothing
@@ -139,13 +138,12 @@ func shadowBuild(ctx context.Context, conn *pgxpool.Conn, schema string, units .
 // both schemas - if the changeset is right, they are the same. Each is built in a scratch schema created inside a
 // transaction that is always rolled back (see scratchBuild): nothing is changed and no apply lock is taken, but the
 // user needs the CREATE privilege on the database
-func VerifyChangeset(baselineBuild plan.Unit, changeset plan.Unit, currentBuild plan.Unit) (afterChangeset drift.Schema, expected drift.Schema, err error) {
-	conn := acquireConn()
-	if conn == nil {
-		return afterChangeset, expected, errors.New("unable to connect to the database")
+func VerifyChangeset(ctx context.Context, baselineBuild plan.Unit, changeset plan.Unit, currentBuild plan.Unit) (afterChangeset drift.Schema, expected drift.Schema, err error) {
+	conn, err := acquireConn(ctx)
+	if err != nil {
+		return afterChangeset, expected, err
 	}
 	defer conn.Release()
-	ctx := context.Background()
 	if afterChangeset, err = scratchBuild(ctx, conn, baselineBuild, changeset); err != nil {
 		return afterChangeset, expected, err
 	}
@@ -167,7 +165,7 @@ func scratchBuild(ctx context.Context, conn *pgxpool.Conn, units ...plan.Unit) (
 	if err != nil {
 		return built, err
 	}
-	defer tx.Rollback(ctx) // always - the scratch schema is only read
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }() // always - the scratch schema is only read
 	if _, err = tx.Exec(ctx, "create schema "+pgx.Identifier{scratchSchema}.Sanitize()); err != nil {
 		if pgErr := asPgError(err); pgErr != nil && pgErr.Code == "42501" { // insufficient_privilege
 			return built, fmt.Errorf("verifying needs the CREATE privilege on the database, to build in a scratch schema that is rolled back: %w", err)
@@ -181,7 +179,7 @@ func scratchBuild(ctx context.Context, conn *pgxpool.Conn, units ...plan.Unit) (
 	}
 	for _, unit := range units {
 		var failures strings.Builder
-		build := executor{ex: savepointExecer{tx: tx, optOut: "it cannot be verified"}, record: noRecord, history: &ApplyHistory{}, out: io.Discard, errOut: &failures}
+		build := executor{ctx: ctx, ex: savepointExecer{tx: tx, optOut: "it cannot be verified"}, record: noRecord, history: &ApplyHistory{}, out: io.Discard, errOut: &failures}
 		if build.run(unit.Steps) > 0 {
 			// nothing is recorded, so the statement ids in the messages mean nothing
 			messages := strings.ReplaceAll(failures.String(), " - Statement ID: 0", "")
@@ -219,7 +217,7 @@ func standInMatview(s drift.Schema, name string) {
 }
 
 // noRecord records nothing - the shadow build is not an apply
-func noRecord(history *ApplyHistory, stmtType string, status string, desc string) (int, error) {
+func noRecord(ctx context.Context, history *ApplyHistory, stmtType string, status string, desc string) (int, error) {
 	return 0, nil
 }
 

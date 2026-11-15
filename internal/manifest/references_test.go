@@ -253,7 +253,7 @@ func TestFunctionFileLookup(t *testing.T) {
 	viper.Set("workdir", workdir)
 	t.Cleanup(func() { viper.Set("workdir", "") })
 	for name, expected := range map[string]string{"both": "from pre", "legacy": "legacy location"} {
-		ddl := SimpleDelta{Object: "function", Action: "add", Name: name}.GenerateDdl()
+		ddl := mustDdl(t, SimpleDelta{Object: "function", Action: "add", Name: name})
 		if ddl != expected {
 			t.Errorf("function %s - EXPECTED: %q  ACTUAL: %q", name, expected, ddl)
 		}

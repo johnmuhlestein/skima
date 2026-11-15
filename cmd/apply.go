@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -69,8 +70,9 @@ This does the following:
   4. sets the search path for the user to ONLY the new schema
 `,
 	Run: func(cmd *cobra.Command, args []string) {
+		ctx := cmd.Context()
 		if dryRun {
-			runPlan("")
+			runPlan(ctx, "")
 			return
 		}
 		manifestVersion = manifest.Version()
@@ -88,50 +90,55 @@ This does the following:
 				// the user defaults to the schema name - set before connecting so the history tables use it too
 				viper.Set("dbconn.username", viper.GetString("dbconn.schema"))
 			}
-			db.Bootstrap(viper.GetString("dbconn.superuser"), viper.GetString("dbconn.superuserpwd"))
-			db.LockApply(viper.GetDuration("lock.timeout"))
-			db.CreateHistTables()
+			exitOnError(ctx, db.Bootstrap(ctx, viper.GetString("dbconn.superuser"), viper.GetString("dbconn.superuserpwd"), os.Stdout))
+			exitOnError(ctx, db.LockApply(ctx, viper.GetDuration("lock.timeout"), os.Stdout))
+			exitOnError(ctx, db.CreateHistTables(ctx, os.Stdout))
 			return
 		}
 		// only one apply runs against a schema at a time - a concurrent apply waits here
-		db.LockApply(viper.GetDuration("lock.timeout"))
+		exitOnError(ctx, db.LockApply(ctx, viper.GetDuration("lock.timeout"), os.Stdout))
+		var err error
 		if hist {
-			db.CreateHistTables()
+			exitOnError(ctx, db.CreateHistTables(ctx, os.Stdout))
 		} else if baseline {
-			db.CreateHistTables()
+			exitOnError(ctx, db.CreateHistTables(ctx, os.Stdout))
 			version := util.ExtractVersion(baselineVersion)
-			activeApplyHist = db.InitializeHistory(version, "baseline", "")
+			activeApplyHist, err = db.InitializeHistory(ctx, version, "baseline", "")
+			exitOnError(ctx, err)
 			activeApplyHist.Status = "success"
-			db.FinalizeHistory(&activeApplyHist)
+			exitOnError(ctx, db.FinalizeHistory(ctx, &activeApplyHist))
 		} else if statesql {
 			p := mustPlan(plan.ForStateSql(viper.GetBool("state.transaction")))
-			activeApplyHist = db.InitializeHistory(manifestVersion, "sql", "")
-			failures = applyUnit(p.Units[0])
+			activeApplyHist, err = db.InitializeHistory(ctx, manifestVersion, "sql", "")
+			exitOnError(ctx, err)
+			failures = applyUnit(ctx, p.Units[0])
 		} else {
-			hist, err := db.GetApplyHistory()
+			hist, err := db.GetApplyHistory(ctx)
 			switch err {
 			case nil:
 				fmt.Printf("Version %s is currently deployed - checking for a more current version to deploy\n", hist.SchemaVersion.String())
 				// changesets take their definitions from the state files, so those are validated too
 				validateBeforeApply(pendingChangesets(hist.SchemaVersion))
-				failures = executeChangesets(hist.SchemaVersion)
+				failures = executeChangesets(ctx, hist.SchemaVersion)
 			case db.ErrNoHistTable:
 				validateBeforeApply(nil)
 				p := mustPlan(plan.ForState(viper.GetBool("state.transaction")))
 				fmt.Println("Schema is not yet managed by skima - creating the history tables")
-				db.CreateHistTables()
+				exitOnError(ctx, db.CreateHistTables(ctx, os.Stdout))
 				fmt.Println("Applying the state definitions")
-				failures = executeState(p)
+				failures = executeState(ctx, p)
 			case pgx.ErrNoRows:
 				validateBeforeApply(nil)
 				p := mustPlan(plan.ForState(viper.GetBool("state.transaction")))
 				fmt.Println("No objects currently managed - will apply the state definition")
-				failures = executeState(p)
+				failures = executeState(ctx, p)
 			default:
-				fmt.Printf("unable to retrieve apply history: %s", err)
-				os.Exit(1)
+				exitOnError(ctx, fmt.Errorf("unable to retrieve the apply history: %w", err))
 			}
-			hist, err = db.GetApplyHistory()
+			if ctx.Err() != nil {
+				os.Exit(exitInterrupted)
+			}
+			hist, err = db.GetApplyHistory(ctx)
 			switch err {
 			case nil:
 				fmt.Printf("Last successfully completed version: %s on %s\n", hist.SchemaVersion.String(), hist.CompletionTimestamp.String())
@@ -140,6 +147,9 @@ This does the following:
 			default:
 				fmt.Fprintf(os.Stderr, "unable to retrieve apply history: %s\n", err)
 			}
+		}
+		if ctx.Err() != nil {
+			os.Exit(exitInterrupted)
 		}
 		// exit codes are 0-255, so a raw failure count of 256 would report success
 		if failures > 0 {
@@ -223,7 +233,7 @@ func mustPlan(p plan.Plan, err error) plan.Plan {
 
 // executeChangesets plans the changesets newer than the deployed version and applies them in order, each as its own
 // run, stopping at the first that fails. It returns the number of failures
-func executeChangesets(deployed util.SemanticVersion) int {
+func executeChangesets(ctx context.Context, deployed util.SemanticVersion) int {
 	p := mustPlan(plan.ForChangesets(deployed))
 	if !p.Pending() {
 		fmt.Printf("There are no changes more current than %s - nothing to see here\n", deployed.String())
@@ -231,9 +241,11 @@ func executeChangesets(deployed util.SemanticVersion) int {
 	}
 	fmt.Printf("%d new changesets to apply\n", len(p.Units))
 	for _, unit := range p.Units {
-		activeApplyHist = db.InitializeHistory(unit.SemVer, "changeset", filepath.Base(unit.File))
+		var err error
+		activeApplyHist, err = db.InitializeHistory(ctx, unit.SemVer, "changeset", filepath.Base(unit.File))
+		exitOnError(ctx, err)
 		fmt.Printf("Initialized run %d for version %s\n", activeApplyHist.RunId, unit.Version)
-		if failures := applyUnit(unit); failures > 0 {
+		if failures := applyUnit(ctx, unit); failures > 0 {
 			return failures
 		}
 	}
@@ -242,26 +254,36 @@ func executeChangesets(deployed util.SemanticVersion) int {
 
 // executeState applies the planned state build. Unless state.transaction is false the whole build runs in a single
 // transaction, so a failure rolls back every object it created
-func executeState(p plan.Plan) int {
-	activeApplyHist = db.InitializeHistory(p.Units[0].SemVer, "state", "")
+func executeState(ctx context.Context, p plan.Plan) int {
+	var err error
+	activeApplyHist, err = db.InitializeHistory(ctx, p.Units[0].SemVer, "state", "")
+	exitOnError(ctx, err)
 	fmt.Printf("Executing state files as run: %d\n", activeApplyHist.RunId)
-	return applyUnit(p.Units[0])
+	return applyUnit(ctx, p.Units[0])
 }
 
 // applyUnit applies a planned run as the active history run, then reports and records its outcome. It returns the
 // number of failures
-func applyUnit(unit plan.Unit) int {
-	failures := db.ApplyUnit(&activeApplyHist, unit)
-	if failures > 0 {
+func applyUnit(ctx context.Context, unit plan.Unit) int {
+	failures, err := db.ApplyUnit(ctx, &activeApplyHist, unit, os.Stdout, os.Stderr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR:", err)
+	}
+	switch {
+	case activeApplyHist.Status == "cancelled":
+		fmt.Fprintf(os.Stderr, "ERROR: RunID %d was interrupted - nothing it applied in a transaction was kept\n", activeApplyHist.RunId)
+	case failures > 0:
 		// a failed changeset keeps the status the apply gave it (e.g. fast-fail) - the state build is marked failed
 		if unit.Kind != plan.UnitChangeset && activeApplyHist.Status != "rolled back" {
 			activeApplyHist.Status = "failed"
 		}
 		fmt.Fprintf(os.Stderr, "ERROR: RunID %d had %d failures applying objects which could indicate additional downstream failures. Review the History to determine failures\n", activeApplyHist.RunId, failures)
-	} else {
+	default:
 		fmt.Printf("SUCCESS: Run %d completed without failures\n", activeApplyHist.RunId)
 		activeApplyHist.Status = "success"
 	}
-	db.FinalizeHistory(&activeApplyHist)
+	if err := db.FinalizeHistory(ctx, &activeApplyHist); err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR:", err)
+	}
 	return failures
 }

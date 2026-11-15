@@ -498,7 +498,7 @@ func (s *Server) verifyChanges(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, err)
 		return
 	}
-	report, err := verify.Run(s.workdir, baseline, draft)
+	report, err := verify.Run(r.Context(), s.workdir, baseline, draft)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "verify_unavailable", "unable to verify against the database: "+err.Error(), nil)
 		return
@@ -549,7 +549,7 @@ func (s *Server) verifyChangeset(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	report, err := verify.File(s.workdir, baseline, path)
+	report, err := verify.File(r.Context(), s.workdir, baseline, path)
 	switch {
 	case errors.As(err, &invalid):
 		writeError(w, http.StatusUnprocessableEntity, "invalid_changeset", name+" is invalid - fix it before verifying", func(e *apiError) { e.Issues = invalid.Issues })

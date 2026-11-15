@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -21,13 +24,40 @@ from scratch databases and deltas over time in an existing database.`,
 	Version: versionString(),
 }
 
-// Execute adds all child commands to the root command and sets flags appropriately.
-// This is called by main.main(). It only needs to happen once to the rootCmd.
+// exitInterrupted is the exit code after Ctrl+C (128 + SIGINT), as a shell reports it
+const exitInterrupted = 130
+
+// Execute runs the command. Its context is cancelled by the first Ctrl+C (or SIGTERM): an apply stops at the statement
+// it is running, rolls back and records the run as cancelled. A second Ctrl+C exits at once
 func Execute() {
-	err := rootCmd.Execute()
-	if err != nil {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-signals:
+			signal.Stop(signals) // a second signal gets the default behaviour - exit now
+			fmt.Fprintln(os.Stderr, "\nInterrupted - stopping (press Ctrl+C again to exit now)")
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		os.Exit(1)
 	}
+}
+
+// exitOnError prints err and exits - with exitInterrupted when it came from Ctrl+C
+func exitOnError(ctx context.Context, err error) {
+	if err == nil {
+		return
+	}
+	fmt.Fprintln(os.Stderr, "ERROR:", err)
+	if ctx.Err() != nil {
+		os.Exit(exitInterrupted)
+	}
+	os.Exit(1)
 }
 
 func init() {

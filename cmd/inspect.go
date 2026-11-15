@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,7 +30,7 @@ Example:
   skima inspect --output=json`,
 	Args: cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
-		retrieveHist()
+		retrieveHist(cmd.Context())
 	},
 }
 
@@ -40,8 +41,8 @@ func init() {
 	cobra.CheckErr(inspectCmd.Flags().MarkHidden("hist"))
 }
 
-func retrieveHist() {
-	applyHist, err := db.GetApplyHistory()
+func retrieveHist(ctx context.Context) {
+	applyHist, err := db.GetApplyHistory(ctx)
 	switch {
 	case errors.Is(err, db.ErrNoHistTable):
 		fmt.Println("Schema is not managed by skima - run 'skima apply' to deploy it, or 'skima apply --hist' to only create the history tables")

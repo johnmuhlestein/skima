@@ -8,6 +8,7 @@
 package verify
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,18 +39,18 @@ type Report struct {
 }
 
 // Run verifies the changeset generated for the changes since the baseline
-func Run(workdir string, baseline changes.Baseline, draft changes.Draft) (Report, error) {
+func Run(ctx context.Context, workdir string, baseline changes.Baseline, draft changes.Draft) (Report, error) {
 	diff, err := changes.Diff(workdir, baseline, draft)
 	if err != nil {
 		return Report{}, err
 	}
-	report, err := Deltas(workdir, baseline, diff.Deltas)
+	report, err := Deltas(ctx, workdir, baseline, diff.Deltas)
 	report.Unsupported = diff.Unsupported
 	return report, err
 }
 
 // Deltas verifies a changeset made of the deltas against the baseline
-func Deltas(workdir string, baseline changes.Baseline, deltas []changes.Delta) (Report, error) {
+func Deltas(ctx context.Context, workdir string, baseline changes.Baseline, deltas []changes.Delta) (Report, error) {
 	scratch, err := os.MkdirTemp("", "skima-verify-")
 	if err != nil {
 		return Report{Baseline: baseline, Deltas: len(deltas), Findings: []drift.Finding{}}, err
@@ -63,12 +64,12 @@ func Deltas(workdir string, baseline changes.Baseline, deltas []changes.Delta) (
 	if err = os.WriteFile(changesetPath, content, 0o644); err != nil {
 		return Report{Baseline: baseline, Deltas: len(deltas), Findings: []drift.Finding{}}, err
 	}
-	return changesetFile(workdir, baseline, changesetPath, len(deltas))
+	return changesetFile(ctx, workdir, baseline, changesetPath, len(deltas))
 }
 
 // File verifies a changeset file - typically the one changeset build wrote, edited by hand to change its intent. The
 // file is validated as apply validates it first: an *changes.InvalidChangesetError lists the problems
-func File(workdir string, baseline changes.Baseline, path string) (Report, error) {
+func File(ctx context.Context, workdir string, baseline changes.Baseline, path string) (Report, error) {
 	rel, err := filepath.Rel(workdir, path)
 	if err != nil {
 		rel = path
@@ -85,14 +86,14 @@ func File(workdir string, baseline changes.Baseline, path string) (Report, error
 	if err = json.Unmarshal(content, &changeset); err != nil {
 		return report, err
 	}
-	report, err = changesetFile(workdir, baseline, path, len(changeset.Deltas))
+	report, err = changesetFile(ctx, workdir, baseline, path, len(changeset.Deltas))
 	report.File = rel
 	return report, err
 }
 
 // changesetFile verifies the changeset file against the baseline. The changeset reads its definitions and scripts
 // from the current state files and deltas/scripts, as apply's would
-func changesetFile(workdir string, baseline changes.Baseline, changesetPath string, deltas int) (Report, error) {
+func changesetFile(ctx context.Context, workdir string, baseline changes.Baseline, changesetPath string, deltas int) (Report, error) {
 	report := Report{Baseline: baseline, Deltas: deltas, Findings: []drift.Finding{}}
 	scratch, err := os.MkdirTemp("", "skima-verify-")
 	if err != nil {
@@ -128,7 +129,7 @@ func changesetFile(workdir string, baseline changes.Baseline, changesetPath stri
 		return report, err
 	}
 
-	afterChangeset, expected, err := db.VerifyChangeset(baselineBuild, changeset, currentBuild)
+	afterChangeset, expected, err := db.VerifyChangeset(ctx, baselineBuild, changeset, currentBuild)
 	var failed *db.ShadowBuildError
 	if errors.As(err, &failed) && failed.Changeset {
 		// the changeset itself failed - that is the verification's finding, not an error running it

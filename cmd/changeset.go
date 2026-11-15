@@ -81,7 +81,7 @@ Example:
 		statements, planErr := changes.PreviewSql(workdir, result.Deltas)
 		var verified *verify.Report
 		if diffVerify && len(result.Deltas) > 0 {
-			report, err := verify.Deltas(workdir, baseline, result.Deltas)
+			report, err := verify.Deltas(cmd.Context(), workdir, baseline, result.Deltas)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "ERROR: unable to verify the changeset:", err)
 				os.Exit(1)
@@ -155,7 +155,7 @@ Example:
 			fmt.Fprintln(os.Stderr, "ERROR:", err)
 			os.Exit(1)
 		}
-		report, err := verify.File(workdir, baseline, path)
+		report, err := verify.File(cmd.Context(), workdir, baseline, path)
 		var invalid *changes.InvalidChangesetError
 		switch {
 		case errors.As(err, &invalid):
