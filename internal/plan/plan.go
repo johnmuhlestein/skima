@@ -1,5 +1,5 @@
 // Package plan works out what skima apply would run against a schema - every statement, in the order it runs them -
-// without connecting to a database. The manifest is read from the configured working directory, like the rest of skima.
+// without connecting to a database. A Planner reads the manifest in its working directory.
 package plan
 
 import (

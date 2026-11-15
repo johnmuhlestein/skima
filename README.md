@@ -4,19 +4,33 @@ structure for both the current state and changesets over time. skima is specific
 for Postgresql databases and is intended as a tool that can be part of a deployment pipeline
 to keep the underlying service database in sync by version
 
-### Compiling skima
-skima is written in go using features from 1.21 - you will need the 1.21.x runtime to compile/execute.
+## Contents
+* [Installing skima](#installing-skima)
+* [Working with a manifest](#working-with-a-manifest) - state files, [State SQL Files](#state-sql-files),
+  [Changesets](#changesets), [Semantic Versioning](#semantic-versioning)
+* [Using skima](#using-skima) - [Planning an apply](#planning-an-apply), [Detecting drift](#detecting-drift),
+  [Generating changesets](#generating-changesets), [The state editor API](#the-state-editor-api),
+  [Formatting](#formatting-the-state-files) and [Validating the manifest](#validating-the-manifest)
+* [The nitty-gritty details](#the-nitty-gritty-details) - [History tables](#history-tables),
+  [Configuration](#configuration), [Environment Variables](#environment-variables)
+* [JSON reference](#json-reference) - snippets for the state files and deltas
+* Development: [CONTRIBUTING.md](CONTRIBUTING.md) and the [architecture overview](docs/architecture.md)
 
-From the command line, make sure you are in the root skima directory
-run `go install ./...` this does require that you have configured your GOPATH environment variable which you can verify `go env GOPATH`
+## Installing skima
+With Go 1.25 or newer:
+```
+go install github.com/johnmuhlestein/skima@latest
+skima --version
+```
 
-### Project Structure (for development)
-skima uses a project structure recommended by the [Cobra](https://github.com/spf13/cobra) project - which is the library that provides the CLI subcommand and flagging capability.
-You can also use the very helpful [cobra-cli](https://github.com/spf13/cobra-cli) for adding new commands or do it manually following the existing patterns in the code
+Or build the Docker image, which runs skima as its entrypoint (it can also source Vault secrets and wait for an Istio
+sidecar - see [entrypoint.sh](entrypoint.sh)):
+```
+docker build --build-arg VERSION=$(git describe --tags --always) -t skima .
+docker run --rm -v "$PWD/myschema:/schema" -e SKM_WORKDIR=/schema skima plan --from none
+```
 
-skima also uses [Viper](https://github.com/spf13/viper), which is a sister project to Cobra for managing configurations across default files, explicit files, command line flags and environment variables
-
-skima also uses go modules for managing library dependencies
+To build from a clone, `make build` writes `./skima` with the version from git - `make help` lists the other tasks.
 
 ### Working with a manifest
 Projects that describe a database schema should follow this simple structure:
@@ -476,8 +490,8 @@ file means - only how it is laid out - and a file's `$schema` is kept.
 * changesets are not formatted
 
 ### Validating the manifest
-Every manifest file is checked against a JSON schema for its kind - tables, views and changesets. Validation catches
-misspelled or unknown properties (property names are case sensitive and lowercase, as documented below), missing required
+Every manifest file is checked against a JSON schema for its kind - tables, views, enums, sequences, materialized views and
+changesets. Validation catches misspelled or unknown properties (property names are case sensitive and lowercase, as documented below), missing required
 properties, invalid values and invalid JSON, and reports where in the file each problem is:
 
 ```
@@ -489,12 +503,13 @@ INVALID  deltas/v1_0_4.json
 ```
 
 * `skima manifest validate` checks every state and changeset file in the working directory, and flags JSON files in `state`
-  that are not named `<name>-table.json` or `<name>-view.json` since skima ignores them
-* `skima manifest validate <file>...` checks individual files - the kind comes from the file name, or use `--type table|view|changeset`
+  that are not named for their kind (`<name>-table.json`, `-view.json`, `-enum.json`, `-sequence.json` or `-matview.json`)
+  since skima ignores them
+* `skima manifest validate <file>...` checks individual files - the kind comes from the file name, or use `--type table|view|enum|sequence|matview|changeset`
 * `--output=json` gives machine readable results; the exit code is 1 when any file is invalid
 
 Validation also checks the references between files:
-* **State files** - a table or view's `name` matches its file name (deltas load `state/users-table.json` for table `users`),
+* **State files** - a state file's `name` matches its file name (deltas load `state/users-table.json` for table `users`),
   no column is defined twice, primary key, index, constraint and foreign key columns exist, and foreign keys reference tables
   that have a state file (schema-qualified tables like `audit.events` are skipped)
 * **Changesets** - the file name is a version (`v1_0_2.json`, `v1_0_2-rc_1.json`) that no other changeset shares - only one
@@ -559,8 +574,10 @@ ERROR: timed out after 5m0s waiting for the apply lock on schema app1 (held by p
 ```
 
 ### Configuration
-Configuration is managed across based on the idea of sane defaults and the ability to override based on how the values are set. The *Environment Variables* section above
-stated to provide some ideas about how this works.
+Every setting has a default and can be set in a config file, in an `SKM_` environment variable or with a command line flag.
+When a setting is given in more than one place the most specific wins: a flag overrides the environment, which overrides
+the config file, which overrides the default. A common setup keeps the connection in the config file and passes the
+password in the environment (see [Environment Variables](#environment-variables)).
 
 #### Configuration files
 The default/lowest level configuration file is named .skima.yaml and is found in the home directory - `~/.skima.yaml` if you either do not have this file or want to override
